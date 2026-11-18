@@ -2,7 +2,8 @@
 
 A native PC build of **Duke Nukem Advance** (GBA, Europe, `AD9P`) made by
 statically recompiling the cartridge with
-[GBARecomp](https://github.com/mstan/gbarecomp), plus PC additions: an in-game
+[GBARecomp](https://github.com/mstan/gbarecomp), plus PC additions: a native renderer that draws the 3D view at the window's
+own resolution and shape (16:9, 21:9, ...) at 60 frames a second, an in-game
 options menu, fullscreen modes and mouse aim. Online play is planned.
 
 No game data is in this repository. You need your own cartridge dump and your
@@ -26,8 +27,19 @@ DukeAdvance/
   DukeAdvanceRecomp/                this repository
 ```
 
-Apply `patches/*.patch` to the `gbarecomp` checkout (`git apply`). Without
-`0001` floors and ceilings render with every other pixel column stale.
+Apply the patches to the `gbarecomp` checkout before building:
+
+```
+cd gbarecomp
+git apply ../DukeAdvanceRecomp/patches/0001-*.patch ../DukeAdvanceRecomp/patches/0002-*.patch ../DukeAdvanceRecomp/patches/0003-*.patch
+git -C external/arm-recomp-core apply ../../../DukeAdvanceRecomp/patches/0004-*.patch
+```
+
+| Patch | Why |
+|---|---|
+| `0001` | 8-bit writes to palette/VRAM/OAM behave as on hardware. Without it floors and ceilings render with every other pixel column stale. |
+| `0002` | Lets the game hand the window a full-size frame of its own, and discount emulated CPU time around guest work it replaces. The native renderer needs both. |
+| `0003`, `0004` | Recompiler: cover the game's self-modifying wall rasterisers statically (branch/no-op slots, rewritten AND and CMP operands). Without them that code runs in the interpreter and the game is several times slower. Rebuild `gba_recompile` after applying. |
 
 ## Build (Windows)
 
@@ -59,9 +71,23 @@ machine.
   Ctrl fires, Q/E switch weapon. The original keys still work: arrows, X (A),
   Z (B), C (L), V (R), Enter (Start), Right Shift (Select).
 
-The picture is the original 3:2 image scaled to fit, with bars at the sides on
-16:9 and 21:9 displays. A wider field of view needs changes to the game's own
-software renderer and is not done yet.
+### Native renderer
+
+On by default (Esc > Graphics > Native renderer). The game's level data is
+read straight from its memory and the 3D view is drawn on the PC:
+
+- at the window's resolution and aspect ratio, so 16:9 and 21:9 displays get a
+  wider view instead of bars; the HUD keeps to the screen corners;
+- at 60 frames a second (the original manages about 30 in open rooms), with
+  the mouse turning the view every display frame;
+- **Render resolution** trades sharpness for speed or a chunkier look, and
+  **Field of view** zooms out further.
+
+The game still runs its own renderer underneath, because gameplay depends on
+it (enemies notice you when they are drawn); its picture is simply not shown.
+The weapon and messages are taken from the game's frame and the HUD from its
+sprites. Turning the option off shows the untouched 240x160 picture at the
+original frame rate. Not handled natively yet: mirrors and skies.
 
 ## Repository map
 
@@ -69,7 +95,11 @@ software renderer and is not done yet.
 |---|---|
 | `src/main.cpp` | Host entry point |
 | `src/pc_controls.cpp` | Mouse aim, WASD layout, their menu rows and settings |
-| `src/debug_watch.cpp` | Debug-server helpers (RAM write watch, synthetic mouse) |
+| `src/scene/` | Native renderer (Doom-style software renderer over the game's level data) |
+| `src/scene_host.cpp` | Hooks the renderer into the game and composites weapon and HUD |
+| `src/debug_watch.cpp` | Debug-server helpers (RAM write watch, synthetic mouse, composite screenshot) |
+| `docs/ENGINE_NOTES.md` | What is known about the game's engine and data formats |
+| `tools/re/` | Reverse-engineering and comparison tools |
 | `recomp.toml` | Hand-written recompiler config |
 | `tools/scan_seeds.py` | Finds pointer-table functions and RAM-copied ARM routines |
 | `tools/drive.py` | Headless, muted test driver over the debug server |

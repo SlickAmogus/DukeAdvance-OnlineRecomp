@@ -27,6 +27,7 @@
 #include "gba_bus.h"
 #include "gba_io.h"
 #include "mod_function_hooks.h"
+#include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "scene/scene.h"
 
@@ -34,6 +35,8 @@ namespace {
 
 constexpr char kHookId[] = "duke.scene_end";
 constexpr std::uint32_t kSceneEndFn = 0x08022EF8u;   // sprite drawer, end of scene pass
+constexpr std::uint32_t kPlaneFn = 0x0801F960u;      // draws one floor/ceiling plane
+constexpr std::uint32_t kSegmentFn = 0x0801FABCu;    // called per wall segment drawn
 constexpr std::uint32_t kDrawPage = 0x0F04;          // IWRAM: pointer to the page being drawn
 constexpr std::uint32_t kMirrorPass = 0x28DC;        // IWRAM: non-zero during a mirror pass
 constexpr std::uint32_t kViewX = 0x2E64, kViewY = 0x2870, kViewZ = 0x2828, kViewAngle = 0x2820;
@@ -75,7 +78,32 @@ std::uint16_t entity_angle(gba::GbaBus* bus) {
     return rd16(bus->ewram_ptr() + (e - 0x02000000u) + kEntityAngle);
 }
 
+// Makes a hooked function return to its caller without running its body.
+// A direct generated call has pushed its return address on the runtime's
+// call-return stack; it is popped here exactly as the function's own return
+// would have done (otherwise every skipped call leaks an entry).
+int skip_function(ArmCpuState* cpu) {
+    const std::uint32_t ret = cpu->R[14] & ~1u;
+    runtime_call_should_return(ret);
+    cpu->R[15] = ret;
+    return 1;
+}
+
+// The scene pass still runs for its side effects, but nothing it draws is
+// shown, so it is charged an eighth of its emulated CPU time. On the console
+// that pass is what holds the game to about 30 frames a second in open rooms;
+// discounted, the game completes a frame every display refresh.
+constexpr unsigned kScenePassDiscountShift = 3;
+
+int segment_hook(std::uint32_t, int, ArmCpuState*) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (g_settings.native && bus && in_bitmap_mode(bus))
+        g_runtime_cycle_discount_shift = kScenePassDiscountShift;
+    return 0;   // observed only: the game's function runs as usual
+}
+
 int scene_end_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    g_runtime_cycle_discount_shift = 0;
     if (!g_settings.native) return 0;
     gba::GbaBus* bus = gbarecomp::active_bus();
     if (!bus || !in_bitmap_mode(bus)) return 0;
@@ -92,12 +120,22 @@ int scene_end_hook(std::uint32_t, int, ArmCpuState* cpu) {
         g_state.entity_angle = entity_angle(bus);
         g_state.have_view = true;
     }
-    cpu->R[15] = cpu->R[14] & ~1u;   // return to the caller; the body is skipped
-    return 1;
+    return skip_function(cpu);
+}
+
+// The game's floor/ceiling drawer only produces pixels, which the hook above
+// throws away anyway.
+int plane_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    if (!g_settings.native) return 0;
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || !in_bitmap_mode(bus)) return 0;
+    return skip_function(cpu);
 }
 
 const int g_registered =
-    gba_mod_register_function_entry_plugin(kHookId, kSceneEndFn, 1, scene_end_hook);
+    gba_mod_register_function_entry_plugin(kHookId, kSceneEndFn, 1, scene_end_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kPlaneFn, 1, plane_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kSegmentFn, 1, segment_hook);
 
 // ---- compositing ---------------------------------------------------------------
 std::vector<std::uint32_t> g_frame;
@@ -312,6 +350,7 @@ void duke_scene_frame_start() {
     // The runtime disables every entry hook when it activates mod plugins, so
     // the hook is (re)armed from the per-frame callback.
     if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
+    if (!g_settings.native) g_runtime_cycle_discount_shift = 0;
 }
 
 bool duke_scene_debug_shot(const char* path, int width, int height) {

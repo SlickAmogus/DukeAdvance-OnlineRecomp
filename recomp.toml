@@ -52,3 +52,97 @@ note = "pitch recentre guard (negative side)"
 addr = 0x08022EF8
 mode = "thumb"
 note = "end of scene pass: native renderer overlay separation"
+
+# 0x0801F960 draws one floor/ceiling plane (pure pixel work). The native
+# renderer replaces it with a no-op while it is on, which is most of what
+# lets the game finish a frame every display refresh.
+[[mod_function_hook]]
+addr = 0x0801F960
+mode = "thumb"
+note = "floor/ceiling plane drawer: skipped under the native renderer"
+
+# The IWRAM wall rasterisers specialise themselves per wall: fifteen
+# instruction slots are switched between an unconditional branch (skip an
+# optional block) and a no-op, and a few MOV/AND/CMP operands are rewritten
+# (patches/0003 teaches the recompiler's RAM templates both forms). The code
+# after each slot is only reachable in the no-op form, so it is seeded here.
+[[extra_func]]
+addr = 0x0300349C
+mode = "arm"
+name = "iwram_after_slot_3498"
+[[extra_func]]
+addr = 0x03006550
+mode = "arm"
+name = "iwram_after_slot_654C"
+[[extra_func]]
+addr = 0x030065A4
+mode = "arm"
+name = "iwram_after_slot_65A0"
+[[extra_func]]
+addr = 0x03006624
+mode = "arm"
+name = "iwram_after_slot_6620"
+[[extra_func]]
+addr = 0x03006690
+mode = "arm"
+name = "iwram_after_slot_668C"
+[[extra_func]]
+addr = 0x030066C0
+mode = "arm"
+name = "iwram_after_slot_66BC"
+[[extra_func]]
+addr = 0x030066EC
+mode = "arm"
+name = "iwram_after_slot_66E8"
+[[extra_func]]
+addr = 0x030066F8
+mode = "arm"
+name = "iwram_after_slot_66F4"
+[[extra_func]]
+addr = 0x03006760
+mode = "arm"
+name = "iwram_after_slot_675C"
+[[extra_func]]
+addr = 0x0300676C
+mode = "arm"
+name = "iwram_after_slot_6768"
+[[extra_func]]
+addr = 0x030068F0
+mode = "arm"
+name = "iwram_after_slot_68EC"
+[[extra_func]]
+addr = 0x03006958
+mode = "arm"
+name = "iwram_after_slot_6954"
+[[extra_func]]
+addr = 0x030069EC
+mode = "arm"
+name = "iwram_after_slot_69E8"
+[[extra_func]]
+addr = 0x03006E74
+mode = "arm"
+name = "iwram_after_slot_6E70"
+[[extra_func]]
+addr = 0x03006EFC
+mode = "arm"
+name = "iwram_after_slot_6EF8"
+# Entries into the unrolled block copy at 0x03007070 (computed jump targets).
+[[extra_func]]
+addr = 0x03007100
+mode = "arm"
+name = "iwram_copy_entry_7100"
+[[extra_func]]
+addr = 0x03007108
+mode = "arm"
+name = "iwram_copy_entry_7108"
+
+# 0x0801FABC is called for every wall segment the game is about to draw. The
+# native renderer only observes this entry (the function always runs): from
+# the first segment to the end of the scene pass the game's emulated CPU time
+# is discounted, because the pixels it draws are not shown. (The pass is not
+# discounted from its very start: before the first segment the game waits for
+# the pending page flip, and that wait must run in real time.)
+[[mod_function_hook]]
+addr = 0x0801FABC
+mode = "thumb"
+note = "wall segment about to be drawn (observed only)"
