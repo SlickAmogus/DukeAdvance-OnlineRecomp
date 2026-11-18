@@ -29,6 +29,12 @@ gbarecomp_add_runtime_target(DukeAdvanceRecomp
 target_sources(DukeAdvanceRecomp PRIVATE src/main.cpp src/debug_watch.cpp src/pc_controls.cpp)
 target_include_directories(DukeAdvanceRecomp PRIVATE
     "${RECOMP_UI_ROOT}/src" ${SDL2_INCLUDE_DIR})
+# Executable icon (assets/icon.ico, made from assets/icon.png). SDL also uses
+# the exe's first icon resource for the window and taskbar.
+if(WIN32)
+    enable_language(RC)
+    target_sources(DukeAdvanceRecomp PRIVATE assets/icon.rc)
+endif()
 # The runtime archives reference each other; GNU ld needs them grouped.
 target_link_gbarecomp_runtime_stack(DukeAdvanceRecomp)
 
