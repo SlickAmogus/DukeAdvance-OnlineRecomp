@@ -1,0 +1,30 @@
+# gba_recompile base config for Duke Nukem Advance (AD9P, Europe).
+# Schema: ../gbarecomp/docs/TOML_SCHEMA.md. Machine-found seeds live in the
+# overlay recomp_scan.toml (tools/scan_seeds.py); reviewed entries go here.
+
+[program]
+name         = "Duke Nukem Advance"
+id           = "dukeadvance"
+load_address = 0x08000000
+size         = 0x00800000
+entry_pc     = 0x08000000
+# Executable part of the cartridge: crt0 through the last libc routine. A sine
+# table and assets follow at 0x080308D0.
+aot_scan_start = 0x080000C0
+aot_scan_end   = 0x080308D0
+
+[identity]
+sha1 = "f01522ee46f5aa821adbba0a97b1a745ff9059f5"
+
+[[extra_func]]
+addr = 0x080000C8
+mode = "arm"
+name = "crt0_start"
+note = "target of the header branch at 0x08000000"
+
+[[code_copy]]
+runtime_start = 0x03003150
+source_start  = 0x087FA21C
+size          = 0x0000411C
+name          = "iwram_image"
+note          = "crt0 (0x08000130) DMA3-copies .iwram: renderer/mixer ARM code plus initialised data"
