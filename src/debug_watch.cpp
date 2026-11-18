@@ -2,7 +2,8 @@
 //
 //   {"cmd":"duke_watch","addr":50338448,"len":4}   arm (len 0 disarms)
 //   {"cmd":"duke_watch_log"}                        dump + clear hits
-//   {"cmd":"duke_mouse","dx":50,"neg":0}            synthetic mouse counts
+//   {"cmd":"duke_mouse","dx":50,"neg":0,"dy":9,"negy":1}   synthetic mouse counts
+//                                       (neg/negy = 1 makes that axis negative)
 //
 // While armed every RAM store goes through the bus (the native RAM fast path
 // stands down when an observer is installed), so it is slow. Reverse
@@ -52,10 +53,13 @@ int duke_debug_tcp_command(const char* request,
     auto reply = [&](const std::string& s) { write(ctx, s.data(), s.size()); };
     gba::GbaBus* bus = gbarecomp::active_bus();
     if (std::strstr(request, "\"duke_mouse\"")) {
-        unsigned long long dx = 0, neg = 0;
+        unsigned long long dx = 0, neg = 0, dy = 0, negy = 0;
         find_uint(request, "\"dx\"", &dx);
         find_uint(request, "\"neg\"", &neg);
-        duke_pc_controls_debug_mouse(neg ? -static_cast<int>(dx) : static_cast<int>(dx));
+        find_uint(request, "\"dy\"", &dy);
+        find_uint(request, "\"negy\"", &negy);
+        duke_pc_controls_debug_mouse(neg ? -static_cast<int>(dx) : static_cast<int>(dx),
+                                     negy ? -static_cast<int>(dy) : static_cast<int>(dy));
         reply("{\"ok\":true}");
         return 1;
     }

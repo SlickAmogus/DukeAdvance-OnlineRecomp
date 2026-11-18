@@ -7,6 +7,16 @@
 //   entity + 0x74      u16 facing angle, 0x10000 = 360 degrees, + = turn right
 //   IWRAM 0x03001968   s32 sin(angle) * 255   (refreshed by the game each tick)
 //   IWRAM 0x0300196C   s32 cos(angle) * 255
+//   IWRAM 0x03002F10   s32 look pitch: the game adds it to the horizon line
+//                      (walls, floors, sprites and aiming all follow it).
+//                      + looks up. The game's own look keys drive it and its
+//                      player update pulls it back to 0 every tick.
+//
+// Vertical mouse movement is added to that pitch. The auto-recentre is switched
+// off while mouse aim is enabled, through two reviewed immediate overrides
+// declared in recomp.toml ([[thumb_alu_immediate_override]]): the two
+// "cmp pitch, #0" tests that guard the recentre at 0x0801C3E4 / 0x0801C3FA are
+// given operands that make both branches skip it.
 //
 // The sin/cos pair is only used as a guard: the angle is written only while
 // a stretch of gameplay has been validated against them, so a stale pointer
@@ -28,6 +38,7 @@
 
 #include "gba_bus.h"
 #include "recomp_runtime_ui.h"
+#include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "touch_input.h"
 
@@ -35,12 +46,14 @@ namespace {
 
 constexpr char kKeyMouseAim[]    = "duke.mouse_aim";
 constexpr char kKeySensitivity[] = "duke.mouse_sensitivity";
+constexpr char kKeyInvertY[]     = "duke.mouse_invert_y";
 constexpr char kKeyWasd[]        = "duke.wasd";
 constexpr char kKeyFilter[]      = "duke.filter";
 
 struct Settings {
     int mouse_aim = 1;
     int sensitivity = 10;   // 1..40
+    int invert_y = 0;
     int wasd = 1;
     int fullscreen = 0;     // 0 windowed, 1 borderless, 2 exclusive (remembered)
     int filter = 0;         // 0 sharp pixels, 1 smooth, 2 sharp-bilinear
@@ -64,6 +77,7 @@ void load_settings(const char* argv0) {
         else if (!std::strcmp(key, "mouse_sensitivity"))
             g_settings.sensitivity = value < 1 ? 1 : value > 40 ? 40 : value;
         else if (!std::strcmp(key, "wasd")) g_settings.wasd = value != 0;
+        else if (!std::strcmp(key, "mouse_invert_y")) g_settings.invert_y = value != 0;
         else if (!std::strcmp(key, "fullscreen"))
             g_settings.fullscreen = value < 0 ? 0 : value > 2 ? 2 : value;
         else if (!std::strcmp(key, "filter"))
@@ -76,14 +90,16 @@ void save_settings() {
     std::FILE* f = std::fopen(g_settings_path.c_str(), "w");
     if (!f) return;
     std::fprintf(f, "mouse_aim = %d\nmouse_sensitivity = %d\nwasd = %d\n"
-                    "fullscreen = %d\nfilter = %d\n",
+                    "mouse_invert_y = %d\nfullscreen = %d\nfilter = %d\n",
                  g_settings.mouse_aim, g_settings.sensitivity, g_settings.wasd,
+                 g_settings.invert_y,
                  g_settings.fullscreen, g_settings.filter);
     std::fclose(f);
 }
 
 // ── host side: mouse capture and motion ─────────────────────────────────────
 std::atomic<int> g_mouse_dx{0};
+std::atomic<int> g_mouse_dy{0};
 std::atomic<std::uint32_t> g_last_policy_ms{0};   // input hook heartbeat
 std::atomic<bool> g_in_gameplay{false};
 bool g_captured = false;
@@ -110,12 +126,15 @@ void update_capture() {
     if (SDL_SetRelativeMouseMode(want ? SDL_TRUE : SDL_FALSE) == 0) {
         g_captured = want;
         g_mouse_dx.store(0, std::memory_order_relaxed);
+        g_mouse_dy.store(0, std::memory_order_relaxed);
     }
 }
 
 int SDLCALL event_watch(void*, SDL_Event* e) {
-    if (e->type == SDL_MOUSEMOTION && g_captured)
+    if (e->type == SDL_MOUSEMOTION && g_captured) {
         g_mouse_dx.fetch_add(e->motion.xrel, std::memory_order_relaxed);
+        g_mouse_dy.fetch_add(e->motion.yrel, std::memory_order_relaxed);
+    }
     update_capture();   // releases the cursor once the menu opens / focus is lost
     return 0;
 }
@@ -153,6 +172,18 @@ bool host_ready() {
 constexpr std::uint32_t kPlayerPtr = 0x2C;      // IWRAM offsets
 constexpr std::uint32_t kSin = 0x1968, kCos = 0x196C;
 constexpr std::uint32_t kAngleOffset = 0x74;
+constexpr std::uint32_t kPitch = 0x2F10;
+constexpr int kPitchLimit = 60;                 // horizon pixels either way
+constexpr std::uint32_t kRecentreCmpUp = 0x0801C3E4u;    // cmp pitch,#0 ; ble skip
+constexpr std::uint32_t kRecentreCmpDown = 0x0801C3FAu;  // cmp pitch,#0 ; bge skip
+
+// Keeps the game's pitch auto-recentre from running while mouse aim is on.
+int recentre_override(std::uint32_t pc, std::uint32_t, std::uint32_t* out) {
+    if (!g_settings.mouse_aim) return 0;
+    if (pc == kRecentreCmpUp) { *out = 0x7FFFFFFFu; return 1; }    // pitch <= max: skip
+    if (pc == kRecentreCmpDown) { *out = 0x80000000u; return 1; }  // pitch >= min: skip
+    return 0;
+}
 
 std::uint32_t rd32(const std::uint8_t* p) {
     return p[0] | (p[1] << 8) | (p[2] << 16) | (std::uint32_t(p[3]) << 24);
@@ -161,6 +192,7 @@ std::uint32_t rd32(const std::uint8_t* p) {
 std::uint32_t g_entity = 0;   // player entity validated for this stretch of play
 bool g_trusted = false;
 double g_fraction = 0.0;
+double g_pitch_fraction = 0.0;
 
 // Returns the player's angle field, or nullptr when not in live gameplay.
 //
@@ -198,10 +230,29 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
     gba::GbaBus* bus = gbarecomp::active_bus();
     std::uint8_t* angle_p = player_angle(info, bus);
     g_in_gameplay.store(angle_p != nullptr, std::memory_order_relaxed);
+    // run_game() clears this hook on entry, so it is (re)installed from here.
+    g_runtime_thumb_alu_imm_override = recentre_override;
     const int dx = g_mouse_dx.exchange(0, std::memory_order_relaxed);
+    const int dy = g_mouse_dy.exchange(0, std::memory_order_relaxed);
     if (!angle_p || !g_settings.mouse_aim || !g_captured) {
         g_fraction = 0.0;
+        g_pitch_fraction = 0.0;
         return;
+    }
+    if (dy != 0) {
+        // Same angular speed as turning: the view is about 4 pixels per degree.
+        const double px = (g_settings.invert_y ? dy : -dy) * g_settings.sensitivity * 0.088 +
+                          g_pitch_fraction;
+        const long whole = std::lround(px);
+        g_pitch_fraction = px - whole;
+        std::uint8_t* p = bus->iwram_ptr() + kPitch;
+        long pitch = static_cast<std::int32_t>(rd32(p)) + whole;
+        pitch = pitch < -kPitchLimit ? -kPitchLimit : pitch > kPitchLimit ? kPitchLimit : pitch;
+        const std::uint32_t v = static_cast<std::uint32_t>(static_cast<std::int32_t>(pitch));
+        p[0] = static_cast<std::uint8_t>(v);
+        p[1] = static_cast<std::uint8_t>(v >> 8);
+        p[2] = static_cast<std::uint8_t>(v >> 16);
+        p[3] = static_cast<std::uint8_t>(v >> 24);
     }
     if (dx == 0) return;
     // Sensitivity 10 = 40 angle units per mouse count (about 1600 counts per turn).
@@ -248,11 +299,13 @@ const char* const kFilterChoices[] = {"Sharp pixels", "Smooth", "Sharp-bilinear"
 
 const RecompRuntimeUiItem kItems[] = {
     {kKeyMouseAim, "Controls", "Mouse aim",
-     "Turn with the mouse during gameplay. Left click fires, right click jumps. "
-     "Open this menu (Esc) to free the cursor.",
+     "Turn and look up/down with the mouse during gameplay. Left click fires, "
+     "right click jumps. Open this menu (Esc) to free the cursor.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeySensitivity, "Controls", "Mouse sensitivity", "Higher turns faster.",
      RECOMP_RUNTIME_UI_INT, 1, 40, 1, nullptr, 0, nullptr},
+    {kKeyInvertY, "Controls", "Invert mouse Y", "Push the mouse forward to look down.",
+     RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeyWasd, "Controls", "WASD layout",
      "W/S move, A/D strafe, Space jumps, Left Ctrl fires, Q/E switch weapon. "
      "The original bindings (arrows, X, Z, C, V) keep working.",
@@ -268,6 +321,7 @@ int ui_get(const char* key, int* out) {
     if (!std::strcmp(key, kKeyMouseAim)) *out = g_settings.mouse_aim;
     else if (!std::strcmp(key, kKeySensitivity)) *out = g_settings.sensitivity;
     else if (!std::strcmp(key, kKeyWasd)) *out = g_settings.wasd;
+    else if (!std::strcmp(key, kKeyInvertY)) *out = g_settings.invert_y;
     else if (!std::strcmp(key, kKeyFilter)) *out = g_settings.filter;
     else return 0;
     return 1;
@@ -278,6 +332,7 @@ int ui_set(const char* key, int value) {
     else if (!std::strcmp(key, kKeySensitivity))
         g_settings.sensitivity = value < 1 ? 1 : value > 40 ? 40 : value;
     else if (!std::strcmp(key, kKeyWasd)) g_settings.wasd = value != 0;
+    else if (!std::strcmp(key, kKeyInvertY)) g_settings.invert_y = value != 0;
     else if (!std::strcmp(key, kKeyFilter))
         g_settings.filter = value < 0 ? 0 : value > 2 ? 2 : value;
     else return 0;
@@ -287,10 +342,11 @@ int ui_set(const char* key, int value) {
 
 }  // namespace
 
-void duke_pc_controls_debug_mouse(int dx) {
+void duke_pc_controls_debug_mouse(int dx, int dy) {
     g_test_capture = true;
     g_captured = true;
     g_mouse_dx.fetch_add(dx, std::memory_order_relaxed);
+    g_mouse_dy.fetch_add(dy, std::memory_order_relaxed);
 }
 
 void duke_pc_controls_startup_args(std::vector<std::string>* extra) {

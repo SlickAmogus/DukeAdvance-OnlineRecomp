@@ -51,8 +51,10 @@ machine.
   exclusive fullscreen), window scale, integer scaling, filters, scanlines,
   volume, save states, and the Controls section below. The fullscreen mode is
   remembered between launches.
-- **Mouse aim** (on by default): the mouse turns, left click fires, right
-  click jumps. The cursor is released while the menu is open.
+- **Mouse aim** (on by default): the mouse turns and looks up/down, left click
+  fires, right click jumps. Sensitivity and invert-Y are under Controls. The
+  cursor is released while the menu is open. Vertical look drives the game's
+  own look pitch; its auto-recentre is off while mouse aim is enabled.
 - **WASD layout** (on by default): W/S move, A/D strafe, Space jumps, Left
   Ctrl fires, Q/E switch weapon. The original keys still work: arrows, X (A),
   Z (B), C (L), V (R), Enter (Start), Right Shift (Select).

@@ -8,8 +8,8 @@
 // rows into the run options. Call once before gbarecomp::run_game().
 void duke_pc_controls_install(gbarecomp::RunOptions* opts, const char* argv0);
 
-// Debug TCP only: feed synthetic horizontal mouse counts (headless testing).
-void duke_pc_controls_debug_mouse(int dx);
+// Debug TCP only: feed synthetic mouse counts (headless testing).
+void duke_pc_controls_debug_mouse(int dx, int dy);
 
 // Remembered display choices (fullscreen mode, scaling filter) as runtime CLI
 // flags. Call after duke_pc_controls_install(); skip for scripted runs.

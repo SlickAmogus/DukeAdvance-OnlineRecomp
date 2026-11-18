@@ -28,3 +28,17 @@ source_start  = 0x087FA21C
 size          = 0x0000411C
 name          = "iwram_image"
 note          = "crt0 (0x08000130) DMA3-copies .iwram: renderer/mixer ARM code plus initialised data"
+
+# Mouse look (src/pc_controls.cpp). The player update at 0x0801C3E0 pulls the
+# look pitch (IWRAM 0x03002F10) back to zero every tick:
+#   0801C3E4  cmp r1,#0 ; ble -> skip the "pitch > 0" decay
+#   0801C3FA  cmp r1,#0 ; bge -> skip the "pitch < 0" decay
+# These two compares may take a game-supplied operand so both decays can be
+# skipped while mouse aim is enabled. With the hook unset they are unchanged.
+[[thumb_alu_immediate_override]]
+addr = 0x0801C3E4
+note = "pitch recentre guard (positive side)"
+
+[[thumb_alu_immediate_override]]
+addr = 0x0801C3FA
+note = "pitch recentre guard (negative side)"
