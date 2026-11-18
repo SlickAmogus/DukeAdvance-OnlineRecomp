@@ -73,10 +73,11 @@ int duke_debug_tcp_command(const char* request,
         const bool ok = duke_scene_debug_shot("scene_shot.ppm", static_cast<int>(w), static_cast<int>(h));
         if (!ok) { reply("{\"ok\":false,\"error\":\"not in the 3D view\"}"); return 1; }
         const DukeSceneView v = duke_scene_debug_view();
-        char buf[160];
-        std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"angle\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}",
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ok\":true,\"angle\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"player\":%u}",
                       v.angle, static_cast<double>(v.x), static_cast<double>(v.y),
-                      static_cast<double>(v.z));
+                      static_cast<double>(v.z), duke_pc_controls_player_entity());
         reply(buf);
         return 1;
     }

@@ -12,7 +12,7 @@ index a109624..5fe01af 100644
  // P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
  // nonzero (only during a healed shard's throwaway validation re-run) runtime_tick
 diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
-index 335c0a9..4ff2fed 100644
+index 335c0a9..e096e05 100644
 --- a/src/runtime/host_window.cpp
 +++ b/src/runtime/host_window.cpp
 @@ -363,6 +363,11 @@ struct Backend {
@@ -94,7 +94,23 @@ index 335c0a9..4ff2fed 100644
      render_host_layers(b);
      // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
      // and stamp the DWM refresh counter into the cadence ring.
-@@ -3893,6 +3937,7 @@ void HostWindow::set_touch_pad_visible(bool /*visible*/) {}
+@@ -3463,7 +3507,14 @@ HostWindow::Events HostWindow::pump() {
+             continue;
+         }
+         if (mouse_event && suppress_opening_touch) continue;
+-        if (b->runtime_imgui_ready) {
++        // While the game has the mouse in relative mode (mouse aim), the UI
++        // must not see mouse events: its SDL backend would treat holding a
++        // button while moving as a drag and take, then release, the system
++        // mouse capture, which knocks the window out of relative mode.
++        // (Releases still pass, so a press from before the capture cannot stick.)
++        const bool game_owns_mouse = mouse_event && e.type != SDL_MOUSEBUTTONUP &&
++            SDL_GetRelativeMouseMode() == SDL_TRUE;
++        if (b->runtime_imgui_ready && !game_owns_mouse) {
+             ImGui::SetCurrentContext(b->runtime_imgui_context);
+             ImGui_ImplSDL2_ProcessEvent(&e);
+         }
+@@ -3893,6 +3944,7 @@ void HostWindow::set_touch_pad_visible(bool /*visible*/) {}
  void HostWindow::set_view_margins(std::uint32_t, std::uint32_t, std::uint32_t,
                                    std::uint32_t) {}
  void HostWindow::set_host_overlay(void (*)(HostOverlay*)) {}

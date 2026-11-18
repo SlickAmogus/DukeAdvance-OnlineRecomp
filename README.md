@@ -38,7 +38,7 @@ git -C external/arm-recomp-core apply ../../../DukeAdvanceRecomp/patches/0004-*.
 | Patch | Why |
 |---|---|
 | `0001` | 8-bit writes to palette/VRAM/OAM behave as on hardware. Without it floors and ceilings render with every other pixel column stale. |
-| `0002` | Lets the game hand the window a full-size frame of its own, and discount emulated CPU time around guest work it replaces. The native renderer needs both. |
+| `0002` | Lets the game hand the window a full-size frame of its own, and discount emulated CPU time around guest work it replaces (the native renderer needs both). Also keeps the menu's UI library away from the mouse while the game has it captured; without that, holding fire while aiming drops mouse aim. |
 | `0003`, `0004` | Recompiler: cover the game's self-modifying wall rasterisers statically (branch/no-op slots, rewritten AND and CMP operands). Without them that code runs in the interpreter and the game is several times slower. Rebuild `gba_recompile` after applying. |
 
 ## Build (Windows)

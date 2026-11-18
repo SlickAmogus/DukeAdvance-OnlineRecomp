@@ -33,7 +33,8 @@ if __name__ == "__main__":
     with Game() as g:
         g.run(60); g.load(ROOT / "build" / "level1_start.state"); g.run(30)
         g.cmd(cmd="duke_scene_shot", w=64, h=48, native=1); g.run(10)
-        prev, bad, missing, teleports = None, [], 0, 0
+        prev, bad, missing, teleports, unlocked = None, [], 0, 0, 0
+        base = struct.unpack("<I", g.mem(0x0300105C, 4))[0]
         was = player_xy(g)
         settle = 0
         for i in range(frames):
@@ -49,6 +50,8 @@ if __name__ == "__main__":
             if teleported:      # the level has teleporters; the camera rightly follows
                 teleports += 1; prev = None; settle = 3
             r = g.cmd(cmd="duke_scene_shot", w=64, h=48)
+            if r.get("ok") and r.get("player") != base:
+                unlocked += 1       # mouse aim would be released on this frame
             if settle:
                 settle -= 1; prev = None; continue
             if not r.get("ok"):
@@ -59,5 +62,5 @@ if __name__ == "__main__":
                 if not (0 <= turn <= 2 * STEP + 8) or move > 24:
                     bad.append((i, turn, round(move, 1)))
             prev = (left, r)
-        print("frames %d, composite missing %d, teleports %d, glitched frames %d: %s"
-              % (frames, missing, teleports, len(bad), bad[:20]))
+        print("frames %d, composite missing %d, player lock lost %d, teleports %d, glitched frames %d: %s"
+              % (frames, missing, unlocked, teleports, len(bad), bad[:20]))

@@ -160,6 +160,7 @@ std::uint32_t colour(std::uint16_t c) {
 void fill(const Layout& l, float x0, float y0, float x1, float y1, std::uint32_t c) {
     const int ax = std::max(0, static_cast<int>(x0 + 0.5f)), bx = std::min(l.w, static_cast<int>(x1 + 0.5f));
     const int ay = std::max(0, static_cast<int>(y0 + 0.5f)), by = std::min(l.h, static_cast<int>(y1 + 0.5f));
+    if (bx <= ax) return;   // off-screen (a window narrower than 3:2 crops the sides)
     for (int y = ay; y < by; ++y) {
         std::uint32_t* row = g_frame.data() + static_cast<std::size_t>(y) * l.w;
         std::fill(row + ax, row + bx, c);
@@ -183,8 +184,25 @@ void draw_bitmap_overlay(const Layout& l, const std::uint8_t* page, const std::u
     }
 }
 
-// HUD sprites. Pieces on the left third stay with the left edge of the
-// window, pieces on the right third with the right edge, the rest centred.
+// Where a HUD pixel column lands on a window wider than 3:2.
+//
+// The status boxes live in a band along the top of the screen: the left box
+// ends at column 68 and the right one starts at column 172. Within that band
+// the left part keeps to the left edge of the window, the right part to the
+// right edge, and whatever lies between (the weapon-select strip that joins
+// the two boxes) is stretched to span the gap, so the band stays in one piece.
+// Everything below the band - the gun, the crosshair - belongs to the 3D view
+// and stays centred with it.
+constexpr int kHudBandBottom = 46, kHudLeftEnd = 68, kHudRightStart = 172;
+
+float hud_x(const Layout& l, int gx, bool top_band) {
+    if (!top_band) return l.box_x + gx * l.scale;
+    if (gx <= kHudLeftEnd) return gx * l.scale;
+    if (gx >= kHudRightStart) return l.w - (240 - gx) * l.scale;
+    const float a = kHudLeftEnd * l.scale, b = l.w - (240 - kHudRightStart) * l.scale;
+    return a + (gx - kHudLeftEnd) * (b - a) / (kHudRightStart - kHudLeftEnd);
+}
+
 void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt) {
     if (!(dispcnt & 0x1000)) return;
     const std::uint8_t* oam = bus->oam_ptr();
@@ -221,10 +239,7 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt) {
                 pc = static_cast<std::int16_t>(rd16(oam + grp + 22));
                 pd = static_cast<std::int16_t>(rd16(oam + grp + 30));
             }
-            const float centre = sx + bw * 0.5f;
-            const float anchor = centre < 100.0f ? 0.0f
-                               : centre > 140.0f ? l.w - 240.0f * l.scale
-                               : static_cast<float>(l.box_x);
+            const bool top_band = sy + bh <= kHudBandBottom;
             for (int y = 0; y < bh; ++y) {
                 const int gy = sy + y;
                 if (gy < 0 || gy >= 160) continue;
@@ -255,7 +270,7 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt) {
                         index = (tx & 1) ? b >> 4 : b & 15;
                     }
                     if (!index) continue;
-                    fill(l, anchor + gx * l.scale, gy * l.scale, anchor + (gx + 1) * l.scale,
+                    fill(l, hud_x(l, gx, top_band), gy * l.scale, hud_x(l, gx + 1, top_band),
                          (gy + 1) * l.scale, colour(rd16(pal + (palbank + index) * 2)));
                 }
             }

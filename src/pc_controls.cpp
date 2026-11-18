@@ -18,9 +18,8 @@
 // "cmp pitch, #0" tests that guard the recentre at 0x0801C3E4 / 0x0801C3FA are
 // given operands that make both branches skip it.
 //
-// The sin/cos pair is only used as a guard: the angle is written only while
-// a stretch of gameplay has been validated against them, so a stale pointer
-// outside gameplay is never written through.
+// The angle is only written while a level is loaded and the game is in its
+// 3D mode; see player_angle() for how the player's entity is found.
 #include "pc_controls.h"
 #include "scene_host.h"
 
@@ -33,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -114,8 +114,14 @@ std::atomic<int> g_mouse_dx{0};
 std::atomic<int> g_mouse_dy{0};
 std::atomic<std::uint32_t> g_last_policy_ms{0};   // input hook heartbeat
 std::atomic<bool> g_in_gameplay{false};
-bool g_captured = false;
+std::atomic<bool> g_captured{false};
 bool g_test_capture = false;        // debug TCP: pretend the mouse is captured
+// SDL's event watch and the game loop both call in, and changing the mouse
+// mode makes SDL deliver events from inside the call, so the lock must allow
+// re-entry and the work itself must not nest.
+std::recursive_mutex g_capture_mutex;
+bool g_capture_busy = false;        // guarded by g_capture_mutex
+std::uint32_t g_unwanted_since_ms = 0;
 
 // Play is "live" while the per-frame input hook keeps firing; the runtime
 // stops calling it whenever its settings menu is open.
@@ -126,19 +132,62 @@ std::uint32_t now_ms() {
 }
 
 bool play_is_live() {
-    return now_ms() - g_last_policy_ms.load(std::memory_order_relaxed) < 250u;
+    return now_ms() - g_last_policy_ms.load(std::memory_order_relaxed) < 200u;
 }
 
+// Short history of why the mouse was taken or let go, kept beside the exe
+// (duke_mouse.log, restarted each launch) so a report of "the cursor came
+// back" can be traced to a cause.
+void capture_log(const char* what, bool focus, bool live, bool gameplay) {
+    static std::FILE* f = nullptr;
+    static int lines = 0;
+    if (!f && !g_settings_path.empty()) {
+        std::string path = g_settings_path;
+        const std::size_t slash = path.find_last_of("/\\");
+        path = (slash == std::string::npos ? std::string() : path.substr(0, slash + 1)) + "duke_mouse.log";
+        f = std::fopen(path.c_str(), "w");
+    }
+    if (!f || ++lines > 2000) return;
+    std::fprintf(f, "%10u ms  %-22s focus=%d live=%d gameplay=%d aim=%d\n", now_ms(), what,
+                 focus ? 1 : 0, live ? 1 : 0, gameplay ? 1 : 0, g_settings.mouse_aim);
+    std::fflush(f);
+}
+
+// Captures the mouse while it should aim and frees it otherwise. The cursor
+// is taken at once but only let go after the reason has held for a moment, so
+// a single odd frame cannot drop the mouse in the middle of a fight; and the
+// decision is checked against what SDL actually has, not a remembered flag,
+// so a capture the system took away is taken back.
 void update_capture() {
+    if (g_test_capture) { g_captured.store(true, std::memory_order_relaxed); return; }
+    std::lock_guard<std::recursive_mutex> lock(g_capture_mutex);
+    if (g_capture_busy) return;
+    struct Busy { Busy() { g_capture_busy = true; } ~Busy() { g_capture_busy = false; } } busy;
     SDL_Window* focus = SDL_GetKeyboardFocus();
-    const bool want = g_settings.mouse_aim && focus && play_is_live() &&
-                      g_in_gameplay.load(std::memory_order_relaxed);
-    if (g_test_capture) { g_captured = true; return; }
-    if (want == g_captured) return;
-    if (SDL_SetRelativeMouseMode(want ? SDL_TRUE : SDL_FALSE) == 0) {
-        g_captured = want;
-        g_mouse_dx.store(0, std::memory_order_relaxed);
-        g_mouse_dy.store(0, std::memory_order_relaxed);
+    const bool live = play_is_live();
+    const bool gameplay = g_in_gameplay.load(std::memory_order_relaxed);
+    const bool want = g_settings.mouse_aim && focus && live && gameplay;
+    const bool have = SDL_GetRelativeMouseMode() == SDL_TRUE;
+    const std::uint32_t now = now_ms();
+    if (want) {
+        g_unwanted_since_ms = 0;
+        if (!have && SDL_SetRelativeMouseMode(SDL_TRUE) == 0) {
+            g_mouse_dx.store(0, std::memory_order_relaxed);
+            g_mouse_dy.store(0, std::memory_order_relaxed);
+            capture_log("captured", focus != nullptr, live, gameplay);
+        }
+        g_captured.store(SDL_GetRelativeMouseMode() == SDL_TRUE, std::memory_order_relaxed);
+        return;
+    }
+    if (!have) { g_captured.store(false, std::memory_order_relaxed); return; }
+    // Losing focus frees the cursor immediately. Anything else has to last a
+    // little: a single slow frame looks exactly like the menu opening (the
+    // per-frame input hook goes quiet), and must not drop the mouse.
+    if (!g_unwanted_since_ms) g_unwanted_since_ms = now ? now : 1u;
+    if (!focus || !g_settings.mouse_aim || now - g_unwanted_since_ms > 200u) {
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        g_captured.store(false, std::memory_order_relaxed);
+        capture_log("released", focus != nullptr, live, gameplay);
     }
 }
 
@@ -146,6 +195,27 @@ int SDLCALL event_watch(void*, SDL_Event* e) {
     if (e->type == SDL_MOUSEMOTION && g_captured) {
         g_mouse_dx.fetch_add(e->motion.xrel, std::memory_order_relaxed);
         g_mouse_dy.fetch_add(e->motion.yrel, std::memory_order_relaxed);
+    }
+    // Only for events that come from the window's own thread; controller and
+    // audio events are delivered from SDL's worker threads.
+    const bool window_thread_event =
+        e->type == SDL_MOUSEMOTION || e->type == SDL_MOUSEBUTTONDOWN ||
+        e->type == SDL_MOUSEBUTTONUP || e->type == SDL_KEYDOWN || e->type == SDL_KEYUP ||
+        e->type == SDL_WINDOWEVENT;
+    if (!window_thread_event) return 0;
+    if (e->type == SDL_WINDOWEVENT && g_captured &&
+        (e->window.event == SDL_WINDOWEVENT_LEAVE ||
+         e->window.event == SDL_WINDOWEVENT_FOCUS_GAINED)) {
+        // The pointer got out, or focus came back: Windows may have dropped
+        // the confinement that relative mode relies on. Take it afresh.
+        std::lock_guard<std::recursive_mutex> lock(g_capture_mutex);
+        if (g_capture_busy) return 0;
+        g_capture_busy = true;
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        g_capture_busy = false;
+        capture_log(e->window.event == SDL_WINDOWEVENT_LEAVE ? "re-arm (pointer left)"
+                                                             : "re-arm (focus gained)",
+                    true, play_is_live(), g_in_gameplay.load(std::memory_order_relaxed));
     }
     update_capture();   // releases the cursor once the menu opens / focus is lost
     return 0;
@@ -182,7 +252,6 @@ bool host_ready() {
 
 // ── guest side ──────────────────────────────────────────────────────────────
 constexpr std::uint32_t kPlayerPtr = 0x2C;      // IWRAM offsets
-constexpr std::uint32_t kSin = 0x1968, kCos = 0x196C;
 constexpr std::uint32_t kAngleOffset = 0x74;
 constexpr std::uint32_t kPitch = 0x2F10;
 constexpr int kPitchLimit = 60;                 // horizon pixels either way
@@ -201,13 +270,16 @@ std::uint32_t rd32(const std::uint8_t* p) {
     return p[0] | (p[1] << 8) | (p[2] << 16) | (std::uint32_t(p[3]) << 24);
 }
 
-std::uint32_t g_entity = 0;   // player entity identified for this stretch of play
+std::uint32_t g_entity = 0;      // the player's entity (guest address), 0 = unknown
+std::uint32_t g_array = 0;       // entity array the vote below belongs to
+int g_votes = 0;                 // confidence in g_entity, see player_angle()
 bool g_trusted = false;
-std::uint32_t g_candidate = 0;   // pointer being confirmed, and for how many frames
-int g_candidate_frames = 0;
-int g_absent_frames = 0;         // frames the slot has not shown the player
 double g_fraction = 0.0;
 double g_pitch_fraction = 0.0;
+
+constexpr std::uint32_t kEntityArray = 0x105C;   // IWRAM: pointer to the entity array
+constexpr std::uint32_t kLines = 0x2884;         // IWRAM: pointer to the level's lines
+constexpr int kVotesTrusted = 8, kVotesMax = 120;
 
 bool plausible_entity(std::uint32_t e) {
     return e >= 0x02000000u && e <= 0x0203FF00u && !(e & 3u);
@@ -215,47 +287,41 @@ bool plausible_entity(std::uint32_t e) {
 
 // Returns the player's angle field, or nullptr when not in live gameplay.
 //
-// IWRAM 0x2C is the entity the game is currently working on. That is the
-// player nearly all the time, but at the instant a display frame starts the
-// game can be in the middle of updating something else (a bullet, an enemy),
-// so the slot must not be followed blindly: turning whatever it points at
-// would steer that object instead. The player is therefore identified once -
-// the slot has to show the same entity for several frames running, with a
-// facing angle that agrees with the game's own sin/cos of the player's angle -
-// and that entity is then kept for as long as the game stays in mode 4.
-// Only a slot that stops showing it altogether (a new level, a restart) makes
-// the search start again.
+// The player is the first record of the game's entity array. IWRAM 0x2C, the
+// entity the game is currently working on, is the player nearly all the time
+// too, but at the instant a display frame starts it can be a bullet or an
+// enemy, or nothing, so it must never be followed directly: turning whatever
+// it points at steers that object instead.
+//
+// The array's first record is used from the first frame. The 0x2C slot only
+// gets a slow majority vote: should it show some other entity far more often
+// than not for seconds on end, that entity is taken to be the player instead
+// (insurance against a level that orders its entities differently). Brief
+// excursions of the slot change nothing.
 std::uint8_t* player_angle(const gbarecomp::ExtendedViewFrameInfo* info, gba::GbaBus* bus) {
-    if (!bus || !info->io || info->io_size < 2 || (info->io[0] & 7u) != 4u) {
-        g_trusted = false;                                   // gameplay is mode 4
-        g_candidate_frames = 0;
-        return nullptr;
-    }
+    g_trusted = false;
+    if (!bus || !info->io || info->io_size < 2 || (info->io[0] & 7u) != 4u)
+        return nullptr;                                      // gameplay is mode 4
     const std::uint8_t* iw = bus->iwram_ptr();
+    const std::uint32_t array = rd32(iw + kEntityArray);
+    if (!plausible_entity(array) || (rd32(iw + kLines) >> 24) != 2u) {
+        g_array = 0;
+        return nullptr;                                      // no level loaded
+    }
+    if (array != g_array) {
+        g_array = array;
+        g_entity = array;
+        g_votes = kVotesTrusted;
+    }
     const std::uint32_t current = rd32(iw + kPlayerPtr);
-    if (g_trusted) {
-        if (current == g_entity) g_absent_frames = 0;
-        else if (current == 0 || ++g_absent_frames > 90) g_trusted = false;
+    if (current == g_entity) {
+        if (g_votes < kVotesMax) ++g_votes;
+    } else if (plausible_entity(current) && --g_votes <= 0) {
+        g_entity = current;
+        g_votes = 1;
     }
-    if (g_trusted)
-        return bus->ewram_ptr() + (g_entity - 0x02000000u) + kAngleOffset;
-    if (!plausible_entity(current)) { g_candidate_frames = 0; return nullptr; }
-    const std::uint8_t* angle_p = bus->ewram_ptr() + (current - 0x02000000u) + kAngleOffset;
-    const std::uint16_t angle = static_cast<std::uint16_t>(angle_p[0] | (angle_p[1] << 8));
-    const double theta = angle * (6.283185307179586 / 65536.0);
-    const int sin_v = static_cast<std::int32_t>(rd32(iw + kSin));
-    const int cos_v = static_cast<std::int32_t>(rd32(iw + kCos));
-    if (std::abs(sin_v - 255.0 * std::sin(theta)) > 8.0 ||
-        std::abs(cos_v - 255.0 * std::cos(theta)) > 8.0) {
-        g_candidate_frames = 0;
-        return nullptr;
-    }
-    if (current != g_candidate) { g_candidate = current; g_candidate_frames = 0; }
-    if (++g_candidate_frames < 4) return nullptr;
-    g_entity = current;
+    if (g_votes < kVotesTrusted) return nullptr;
     g_trusted = true;
-    g_absent_frames = 0;
-    g_candidate_frames = 0;
     return bus->ewram_ptr() + (g_entity - 0x02000000u) + kAngleOffset;
 }
 
@@ -405,7 +471,7 @@ std::uint32_t duke_pc_controls_player_entity() { return g_trusted ? g_entity : 0
 
 void duke_pc_controls_debug_mouse(int dx, int dy) {
     g_test_capture = true;
-    g_captured = true;
+    g_captured.store(true, std::memory_order_relaxed);
     g_mouse_dx.fetch_add(dx, std::memory_order_relaxed);
     g_mouse_dy.fetch_add(dy, std::memory_order_relaxed);
 }
