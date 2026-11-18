@@ -13,6 +13,12 @@ void duke_pc_controls_install(gbarecomp::RunOptions* opts, const char* argv0);
 // current stretch of gameplay, otherwise 0.
 std::uint32_t duke_pc_controls_player_entity();
 
+// Mouse movement not yet handed to the game (it is applied once per game
+// tick): turn in angle units (0x10000 = 360 degrees, + = right) and look in
+// horizon pixels (+ = up). The renderer adds it so the view follows the mouse
+// every display frame.
+void duke_pc_controls_pending_aim(double* yaw_units, double* pitch_pixels);
+
 // Debug TCP only: feed synthetic mouse counts (headless testing).
 void duke_pc_controls_debug_mouse(int dx, int dy);
 

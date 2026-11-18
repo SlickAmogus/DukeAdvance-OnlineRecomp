@@ -19,6 +19,7 @@
 #include "scene_host.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -333,10 +334,18 @@ bool compose(int out_w, int out_h) {
     o.view_angle = g_state.angle;
     std::uint16_t now = 0;
     if (g_state.have_entity_angle && entity_angle(bus, &now)) {
-        // Only ever a fraction of a turn; anything larger is not mouse movement.
-        const std::int16_t lead = static_cast<std::int16_t>(now - g_state.entity_angle);
+        // Turning the game has applied since it drew, plus mouse movement it
+        // has not been given yet (that happens once per game tick). Only ever
+        // a fraction of a turn; anything larger is not mouse movement.
+        double pending_yaw = 0.0, pending_pitch = 0.0;
+        duke_pc_controls_pending_aim(&pending_yaw, &pending_pitch);
+        const long lead = static_cast<std::int16_t>(now - g_state.entity_angle) +
+                          std::lround(pending_yaw);
         if (lead > -0x1800 && lead < 0x1800)
             o.view_angle = static_cast<std::uint16_t>(g_state.angle + lead);
+        // The game clamps the look pitch to +/-60; keep the preview inside it.
+        const double pitch = static_cast<std::int32_t>(rd32(bus->iwram_ptr() + 0x2F10));
+        o.pitch_offset = static_cast<float>(std::clamp(pitch + pending_pitch, -60.0, 60.0) - pitch);
     }
     g_last_view = {o.view_x, o.view_y, o.view_z, o.view_angle};
     g_frame.resize(static_cast<std::size_t>(out_w) * out_h);

@@ -21,7 +21,7 @@ scan. The reference source is a Doom port: `r_bsp.cpp`, `r_segs.cpp`,
 | `0x08002A4C` | Draw one subsector: back-face test per seg, then `0x080210A0` |
 | `0x080210A0` | Draw one wall seg: clip (`0x030041D4`), project (`0x080211F8`), subdivide for perspective (`0x08002D20`), rasterise (IWRAM, via view+0xDC) |
 | `0x0801FABC` | Find/merge the floor-ceiling plane for the current column range |
-| `0x0801BDCC` | Player update (movement, look pitch, recentre) |
+| `0x0801BDCC` | Player update (movement, turning, look pitch, recentre), once per game tick. Mouse aim is applied at its entry: the only point where changing the facing angle cannot be overwritten by the tick in progress |
 
 The 3D view is 120 columns, each drawn 2 pixels wide, 160 rows.
 
@@ -96,6 +96,7 @@ The teleporter shimmer is the game indexing its light tables with level
 | `0x03002820` | View angle (u16, 0x10000 = 360 degrees). Forward = (sin a, cos a), right = (cos a, -sin a) |
 | `0x03002850`, `0x03002EF8` | Forward vector x510 and right vector x128 |
 | `0x0300002C` | Pointer to the entity the game is working on. Usually the player, but **not always** (bullets, enemies mid-update): never write through it blindly. Entity fields: +0x40/+0x44 x,y, +0x74 angle |
+| `0x03001344` | **The game's pointer to the player entity.** Use this one |
 | `0x0300105C` | Entity array; the first record is the player |
 | `0x0201574C`, `0x03000110` | Pistol ammunition (level 1) |
 | `0x03002F10` | Look pitch (horizon offset in pixels) |

@@ -146,3 +146,14 @@ name = "iwram_copy_entry_7108"
 addr = 0x0801FABC
 mode = "thumb"
 note = "wall segment about to be drawn (observed only)"
+
+# 0x0801BDCC is the game's player update (movement, turning, look pitch), run
+# once per game tick. Mouse aim only observes this entry: it adds the mouse
+# movement gathered since the last tick to the player's angle and pitch here,
+# immediately before the game reads them. (Writing them at display-frame
+# boundaries instead lands at an arbitrary point of the tick, and in some
+# scenes the game then overwrites the change every frame.)
+[[mod_function_hook]]
+addr = 0x0801BDCC
+mode = "thumb"
+note = "player update: mouse aim applied here (observed only)"

@@ -1,25 +1,27 @@
 // PC controls for Duke Nukem Advance: mouse aim + WASD/mouse-button layout.
 //
-// Mouse aim adds the horizontal mouse movement straight onto the player's
-// facing angle at the start of every emulated frame. Guest facts (AD9P):
+// Mouse aim adds the mouse movement to the player's facing angle and look
+// pitch once per game tick, at the entry of the game's own player update
+// (a [[mod_function_hook]] in recomp.toml that only observes). Guest facts
+// (AD9P):
 //
-//   IWRAM 0x0300002C   pointer to the player entity (EWRAM)
+//   IWRAM 0x03001344   the game's pointer to the player entity (EWRAM)
 //   entity + 0x74      u16 facing angle, 0x10000 = 360 degrees, + = turn right
-//   IWRAM 0x03001968   s32 sin(angle) * 255   (refreshed by the game each tick)
-//   IWRAM 0x0300196C   s32 cos(angle) * 255
 //   IWRAM 0x03002F10   s32 look pitch: the game adds it to the horizon line
 //                      (walls, floors, sprites and aiming all follow it).
 //                      + looks up. The game's own look keys drive it and its
 //                      player update pulls it back to 0 every tick.
+//   0x0801BDCC         player update, run once per game tick
 //
-// Vertical mouse movement is added to that pitch. The auto-recentre is switched
-// off while mouse aim is enabled, through two reviewed immediate overrides
-// declared in recomp.toml ([[thumb_alu_immediate_override]]): the two
-// "cmp pitch, #0" tests that guard the recentre at 0x0801C3E4 / 0x0801C3FA are
-// given operands that make both branches skip it.
+// The pitch auto-recentre is switched off while mouse aim is enabled, through
+// two reviewed immediate overrides declared in recomp.toml
+// ([[thumb_alu_immediate_override]]): the two "cmp pitch, #0" tests that guard
+// the recentre at 0x0801C3E4 / 0x0801C3FA are given operands that make both
+// branches skip it.
 //
-// The angle is only written while a level is loaded and the game is in its
-// 3D mode; see player_angle() for how the player's entity is found.
+// Two things that do NOT work, both tried: IWRAM 0x0300002C is merely the
+// entity the game is working on (often a bullet), and writing the angle at
+// display-frame boundaries lands mid-tick, where the game may overwrite it.
 #include "pc_controls.h"
 #include "scene_host.h"
 
@@ -38,6 +40,7 @@
 #include <vector>
 
 #include "gba_bus.h"
+#include "mod_function_hooks.h"
 #include "recomp_runtime_ui.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
@@ -251,12 +254,17 @@ bool host_ready() {
 }
 
 // ── guest side ──────────────────────────────────────────────────────────────
-constexpr std::uint32_t kPlayerPtr = 0x2C;      // IWRAM offsets
+constexpr std::uint32_t kPlayerPtr = 0x1344;    // IWRAM: the game's pointer to the player
 constexpr std::uint32_t kAngleOffset = 0x74;
-constexpr std::uint32_t kPitch = 0x2F10;
+constexpr std::uint32_t kPitch = 0x2F10;        // IWRAM: look pitch
 constexpr int kPitchLimit = 60;                 // horizon pixels either way
+constexpr std::uint32_t kPlayerUpdateFn = 0x0801BDCCu;
 constexpr std::uint32_t kRecentreCmpUp = 0x0801C3E4u;    // cmp pitch,#0 ; ble skip
 constexpr std::uint32_t kRecentreCmpDown = 0x0801C3FAu;  // cmp pitch,#0 ; bge skip
+constexpr char kMouseHookId[] = "duke.mouse_aim";
+// Sensitivity 10 = 40 angle units per mouse count (about 1600 counts per turn),
+// and the same angular speed up and down: the view is about 4 pixels per degree.
+constexpr double kYawPerCount = 4.0, kPitchPerCount = 0.088;
 
 // Keeps the game's pitch auto-recentre from running while mouse aim is on.
 int recentre_override(std::uint32_t pc, std::uint32_t, std::uint32_t* out) {
@@ -270,78 +278,37 @@ std::uint32_t rd32(const std::uint8_t* p) {
     return p[0] | (p[1] << 8) | (p[2] << 16) | (std::uint32_t(p[3]) << 24);
 }
 
-std::uint32_t g_entity = 0;      // the player's entity (guest address), 0 = unknown
-std::uint32_t g_array = 0;       // entity array the vote below belongs to
-int g_votes = 0;                 // confidence in g_entity, see player_angle()
-bool g_trusted = false;
+std::uint32_t g_entity = 0;            // the player's entity (guest address), 0 = unknown
+bool g_trusted = false;                // the game is ticking the player right now
+std::uint64_t g_frame = 0;             // display frames seen
+std::uint64_t g_last_update_frame = 0; // display frame of the latest player update
 double g_fraction = 0.0;
 double g_pitch_fraction = 0.0;
-
-constexpr std::uint32_t kEntityArray = 0x105C;   // IWRAM: pointer to the entity array
-constexpr std::uint32_t kLines = 0x2884;         // IWRAM: pointer to the level's lines
-constexpr int kVotesTrusted = 8, kVotesMax = 120;
 
 bool plausible_entity(std::uint32_t e) {
     return e >= 0x02000000u && e <= 0x0203FF00u && !(e & 3u);
 }
 
-// Returns the player's angle field, or nullptr when not in live gameplay.
-//
-// The player is the first record of the game's entity array. IWRAM 0x2C, the
-// entity the game is currently working on, is the player nearly all the time
-// too, but at the instant a display frame starts it can be a bullet or an
-// enemy, or nothing, so it must never be followed directly: turning whatever
-// it points at steers that object instead.
-//
-// The array's first record is used from the first frame. The 0x2C slot only
-// gets a slow majority vote: should it show some other entity far more often
-// than not for seconds on end, that entity is taken to be the player instead
-// (insurance against a level that orders its entities differently). Brief
-// excursions of the slot change nothing.
-std::uint8_t* player_angle(const gbarecomp::ExtendedViewFrameInfo* info, gba::GbaBus* bus) {
-    g_trusted = false;
-    if (!bus || !info->io || info->io_size < 2 || (info->io[0] & 7u) != 4u)
-        return nullptr;                                      // gameplay is mode 4
-    const std::uint8_t* iw = bus->iwram_ptr();
-    const std::uint32_t array = rd32(iw + kEntityArray);
-    if (!plausible_entity(array) || (rd32(iw + kLines) >> 24) != 2u) {
-        g_array = 0;
-        return nullptr;                                      // no level loaded
-    }
-    if (array != g_array) {
-        g_array = array;
-        g_entity = array;
-        g_votes = kVotesTrusted;
-    }
-    const std::uint32_t current = rd32(iw + kPlayerPtr);
-    if (current == g_entity) {
-        if (g_votes < kVotesMax) ++g_votes;
-    } else if (plausible_entity(current) && --g_votes <= 0) {
-        g_entity = current;
-        g_votes = 1;
-    }
-    if (g_votes < kVotesTrusted) return nullptr;
-    g_trusted = true;
-    return bus->ewram_ptr() + (g_entity - 0x02000000u) + kAngleOffset;
+bool aiming() {
+    return g_settings.mouse_aim && g_captured.load(std::memory_order_relaxed);
 }
 
-void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
+// Runs at the entry of the game's player update, once per game tick. This is
+// the one moment at which changing the player's facing is safe: the game is
+// about to read it, and has finished with last tick's value. The function
+// itself always runs (the hook only observes).
+int player_update_hook(std::uint32_t, int, ArmCpuState*) {
     gba::GbaBus* bus = gbarecomp::active_bus();
-    std::uint8_t* angle_p = player_angle(info, bus);
-    g_in_gameplay.store(angle_p != nullptr, std::memory_order_relaxed);
-    // run_game() clears this hook on entry, so it is (re)installed from here.
-    g_runtime_thumb_alu_imm_override = recentre_override;
-    duke_scene_frame_start();
+    if (!bus) return 0;
+    const std::uint32_t entity = rd32(bus->iwram_ptr() + kPlayerPtr);
+    if (!plausible_entity(entity)) return 0;
+    g_entity = entity;
+    g_last_update_frame = g_frame;
+    if (!aiming()) return 0;
     const int dx = g_mouse_dx.exchange(0, std::memory_order_relaxed);
     const int dy = g_mouse_dy.exchange(0, std::memory_order_relaxed);
-    if (!angle_p || !g_settings.mouse_aim || !g_captured) {
-        g_fraction = 0.0;
-        g_pitch_fraction = 0.0;
-        return;
-    }
     if (dy != 0) {
-        // Same angular speed as turning: the view is about 4 pixels per degree.
-        const double px = (g_settings.invert_y ? dy : -dy) * g_settings.sensitivity * 0.088 +
+        const double px = (g_settings.invert_y ? dy : -dy) * g_settings.sensitivity * kPitchPerCount +
                           g_pitch_fraction;
         const long whole = std::lround(px);
         g_pitch_fraction = px - whole;
@@ -354,16 +321,43 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
         p[2] = static_cast<std::uint8_t>(v >> 16);
         p[3] = static_cast<std::uint8_t>(v >> 24);
     }
-    if (dx == 0) return;
-    // Sensitivity 10 = 40 angle units per mouse count (about 1600 counts per turn).
-    const double units = dx * g_settings.sensitivity * 4.0 + g_fraction;
-    const long whole = std::lround(units);
-    g_fraction = units - whole;
-    if (whole == 0) return;
-    const std::uint16_t angle = static_cast<std::uint16_t>(
-        (angle_p[0] | (angle_p[1] << 8)) + whole);
-    angle_p[0] = static_cast<std::uint8_t>(angle);
-    angle_p[1] = static_cast<std::uint8_t>(angle >> 8);
+    if (dx != 0) {
+        const double units = dx * g_settings.sensitivity * kYawPerCount + g_fraction;
+        const long whole = std::lround(units);
+        g_fraction = units - whole;
+        std::uint8_t* angle_p = bus->ewram_ptr() + (entity - 0x02000000u) + kAngleOffset;
+        const std::uint16_t angle = static_cast<std::uint16_t>(
+            (angle_p[0] | (angle_p[1] << 8)) + whole);
+        angle_p[0] = static_cast<std::uint8_t>(angle);
+        angle_p[1] = static_cast<std::uint8_t>(angle >> 8);
+    }
+    return 0;
+}
+
+const int g_mouse_hook_registered =
+    gba_mod_register_function_entry_plugin(kMouseHookId, kPlayerUpdateFn, 1, player_update_hook);
+
+// Start of every display frame. Decides whether the game is in live play: it
+// is while it is in its 3D mode and has run the player update within the last
+// third of a second (which stops when the game is paused or in a menu).
+void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
+    ++g_frame;
+    const bool mode4 = info->io && info->io_size >= 2 && (info->io[0] & 7u) == 4u;
+    g_trusted = mode4 && g_entity != 0 && g_frame - g_last_update_frame <= 20;
+    if (!mode4) g_entity = 0;
+    g_in_gameplay.store(g_trusted, std::memory_order_relaxed);
+    // run_game() clears these hooks on entry, so they are (re)installed from here.
+    g_runtime_thumb_alu_imm_override = recentre_override;
+    if (g_mouse_hook_registered) gba_mod_set_function_hook_enabled(kMouseHookId, 1);
+    duke_scene_frame_start();
+    if (!g_trusted || !aiming()) {
+        // Nothing is going to consume mouse movement: do not let it pile up
+        // and swing the view when aim resumes.
+        g_mouse_dx.store(0, std::memory_order_relaxed);
+        g_mouse_dy.store(0, std::memory_order_relaxed);
+        g_fraction = 0.0;
+        g_pitch_fraction = 0.0;
+    }
 }
 
 // GBA KEYINPUT bits (active low): 0=A 1=B 2=Select 3=Start 4=Right 5=Left
@@ -468,6 +462,17 @@ int ui_set(const char* key, int value) {
 }  // namespace
 
 std::uint32_t duke_pc_controls_player_entity() { return g_trusted ? g_entity : 0u; }
+
+void duke_pc_controls_pending_aim(double* yaw_units, double* pitch_pixels) {
+    *yaw_units = 0.0;
+    *pitch_pixels = 0.0;
+    if (!g_trusted || !aiming()) return;
+    const int dx = g_mouse_dx.load(std::memory_order_relaxed);
+    const int dy = g_mouse_dy.load(std::memory_order_relaxed);
+    *yaw_units = dx * g_settings.sensitivity * kYawPerCount + g_fraction;
+    *pitch_pixels = (g_settings.invert_y ? dy : -dy) * g_settings.sensitivity * kPitchPerCount +
+                    g_pitch_fraction;
+}
 
 void duke_pc_controls_debug_mouse(int dx, int dy) {
     g_test_capture = true;
