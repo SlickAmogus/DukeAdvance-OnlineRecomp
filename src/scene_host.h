@@ -16,6 +16,10 @@ void duke_scene_install(gbarecomp::RunOptions* opts);
 // Call once per emulated frame (keeps the scene hook armed).
 void duke_scene_frame_start();
 
+// Debug TCP only: the camera the most recent composite was drawn from.
+struct DukeSceneView { float x = 0, y = 0, z = 0; unsigned angle = 0; };
+DukeSceneView duke_scene_debug_view();
+
 // Debug TCP only: write the current composite as a PPM. False when the game
 // is not in its 3D view.
 bool duke_scene_debug_shot(const char* path, int width, int height);

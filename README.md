@@ -68,8 +68,8 @@ machine.
   cursor is released while the menu is open. Vertical look drives the game's
   own look pitch; its auto-recentre is off while mouse aim is enabled.
 - **WASD layout** (on by default): W/S move, A/D strafe, Space jumps, Left
-  Ctrl fires, Q/E switch weapon. The original keys still work: arrows, X (A),
-  Z (B), C (L), V (R), Enter (Start), Right Shift (Select).
+  Ctrl fires, Q/E switch weapon. The original keys still work: arrows, Z (B,
+  fire), X (A, jump), C (L), V (R), Enter (Start), Right Shift (Select).
 
 ### Native renderer
 

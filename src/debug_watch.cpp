@@ -71,7 +71,13 @@ int duke_debug_tcp_command(const char* request,
         find_uint(request, "\"h\"", &h);
         if (find_uint(request, "\"native\"", &native)) duke_scene_settings()->native = native != 0;
         const bool ok = duke_scene_debug_shot("scene_shot.ppm", static_cast<int>(w), static_cast<int>(h));
-        reply(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"not in the 3D view\"}");
+        if (!ok) { reply("{\"ok\":false,\"error\":\"not in the 3D view\"}"); return 1; }
+        const DukeSceneView v = duke_scene_debug_view();
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"angle\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}",
+                      v.angle, static_cast<double>(v.x), static_cast<double>(v.y),
+                      static_cast<double>(v.z));
+        reply(buf);
         return 1;
     }
     if (std::strstr(request, "\"duke_watch_log\"")) {

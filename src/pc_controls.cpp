@@ -201,41 +201,62 @@ std::uint32_t rd32(const std::uint8_t* p) {
     return p[0] | (p[1] << 8) | (p[2] << 16) | (std::uint32_t(p[3]) << 24);
 }
 
-std::uint32_t g_entity = 0;   // player entity validated for this stretch of play
+std::uint32_t g_entity = 0;   // player entity identified for this stretch of play
 bool g_trusted = false;
+std::uint32_t g_candidate = 0;   // pointer being confirmed, and for how many frames
+int g_candidate_frames = 0;
+int g_absent_frames = 0;         // frames the slot has not shown the player
 double g_fraction = 0.0;
 double g_pitch_fraction = 0.0;
 
+bool plausible_entity(std::uint32_t e) {
+    return e >= 0x02000000u && e <= 0x0203FF00u && !(e & 3u);
+}
+
 // Returns the player's angle field, or nullptr when not in live gameplay.
 //
-// The pointer is validated against the game's own sin/cos of the facing angle
-// when a stretch of gameplay begins, and then trusted for as long as the game
-// stays in mode 4 with the same entity pointer. (It cannot be re-checked every
-// frame: the sin/cos pair lags our own writes by up to a game tick.)
+// IWRAM 0x2C is the entity the game is currently working on. That is the
+// player nearly all the time, but at the instant a display frame starts the
+// game can be in the middle of updating something else (a bullet, an enemy),
+// so the slot must not be followed blindly: turning whatever it points at
+// would steer that object instead. The player is therefore identified once -
+// the slot has to show the same entity for several frames running, with a
+// facing angle that agrees with the game's own sin/cos of the player's angle -
+// and that entity is then kept for as long as the game stays in mode 4.
+// Only a slot that stops showing it altogether (a new level, a restart) makes
+// the search start again.
 std::uint8_t* player_angle(const gbarecomp::ExtendedViewFrameInfo* info, gba::GbaBus* bus) {
-    g_trusted = g_trusted && bus && info->io && info->io_size >= 2 &&
-                (info->io[0] & 7u) == 4u;                    // gameplay is mode 4
-    if (!bus || !info->io || info->io_size < 2 || (info->io[0] & 7u) != 4u)
+    if (!bus || !info->io || info->io_size < 2 || (info->io[0] & 7u) != 4u) {
+        g_trusted = false;                                   // gameplay is mode 4
+        g_candidate_frames = 0;
         return nullptr;
-    const std::uint8_t* iw = bus->iwram_ptr();
-    const std::uint32_t entity = rd32(iw + kPlayerPtr);
-    if (entity < 0x02000000u || entity > 0x0203FF00u || (entity & 3u) ||
-        (g_trusted && entity != g_entity)) {
-        g_trusted = false;
-        if (entity < 0x02000000u || entity > 0x0203FF00u || (entity & 3u)) return nullptr;
     }
-    std::uint8_t* angle_p = bus->ewram_ptr() + (entity - 0x02000000u) + kAngleOffset;
-    if (g_trusted) return angle_p;
+    const std::uint8_t* iw = bus->iwram_ptr();
+    const std::uint32_t current = rd32(iw + kPlayerPtr);
+    if (g_trusted) {
+        if (current == g_entity) g_absent_frames = 0;
+        else if (current == 0 || ++g_absent_frames > 90) g_trusted = false;
+    }
+    if (g_trusted)
+        return bus->ewram_ptr() + (g_entity - 0x02000000u) + kAngleOffset;
+    if (!plausible_entity(current)) { g_candidate_frames = 0; return nullptr; }
+    const std::uint8_t* angle_p = bus->ewram_ptr() + (current - 0x02000000u) + kAngleOffset;
     const std::uint16_t angle = static_cast<std::uint16_t>(angle_p[0] | (angle_p[1] << 8));
     const double theta = angle * (6.283185307179586 / 65536.0);
     const int sin_v = static_cast<std::int32_t>(rd32(iw + kSin));
     const int cos_v = static_cast<std::int32_t>(rd32(iw + kCos));
     if (std::abs(sin_v - 255.0 * std::sin(theta)) > 8.0 ||
-        std::abs(cos_v - 255.0 * std::cos(theta)) > 8.0)
+        std::abs(cos_v - 255.0 * std::cos(theta)) > 8.0) {
+        g_candidate_frames = 0;
         return nullptr;
-    g_entity = entity;
+    }
+    if (current != g_candidate) { g_candidate = current; g_candidate_frames = 0; }
+    if (++g_candidate_frames < 4) return nullptr;
+    g_entity = current;
     g_trusted = true;
-    return angle_p;
+    g_absent_frames = 0;
+    g_candidate_frames = 0;
+    return bus->ewram_ptr() + (g_entity - 0x02000000u) + kAngleOffset;
 }
 
 void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
@@ -280,7 +301,9 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
 }
 
 // GBA KEYINPUT bits (active low): 0=A 1=B 2=Select 3=Start 4=Right 5=Left
-// 6=Up 7=Down 8=R 9=L. In-game: A fires, B jumps, L/R strafe.
+// 6=Up 7=Down 8=R 9=L. In-game: B fires, A jumps, L/R strafe, Select
+// switches weapon (checked against the running game: holding B spends ammo,
+// tapping A lifts the view).
 std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
     g_last_policy_ms.store(now_ms(), std::memory_order_relaxed);
     std::uint16_t keys = 0x03FF;
@@ -294,14 +317,14 @@ std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
         if (k[SDL_SCANCODE_S]) press(7);
         if (k[SDL_SCANCODE_A]) press(9);
         if (k[SDL_SCANCODE_D]) press(8);
-        if (k[SDL_SCANCODE_SPACE]) press(1);
-        if (k[SDL_SCANCODE_LCTRL]) press(0);
+        if (k[SDL_SCANCODE_SPACE]) press(0);    // jump
+        if (k[SDL_SCANCODE_LCTRL]) press(1);    // fire
         if (k[SDL_SCANCODE_Q] || k[SDL_SCANCODE_E]) press(2);   // weapon select
     }
     if (g_captured) {
         const Uint32 buttons = SDL_GetMouseState(nullptr, nullptr);
-        if (buttons & SDL_BUTTON_LMASK) press(0);
-        if (buttons & SDL_BUTTON_RMASK) press(1);
+        if (buttons & SDL_BUTTON_LMASK) press(1);   // fire
+        if (buttons & SDL_BUTTON_RMASK) press(0);   // jump
         if (buttons & SDL_BUTTON_MMASK) press(2);
     }
     return keys;
@@ -336,7 +359,7 @@ const RecompRuntimeUiItem kItems[] = {
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeyWasd, "Controls", "WASD layout",
      "W/S move, A/D strafe, Space jumps, Left Ctrl fires, Q/E switch weapon. "
-     "The original bindings (arrows, X, Z, C, V) keep working.",
+     "The original bindings (arrows, Z fires, X jumps, C, V) keep working.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeyFilter, "Graphics", "Scaling filter (next launch)",
      "How the 240x160 image is scaled up. Sharp pixels is the raw look, Smooth "
@@ -377,6 +400,8 @@ int ui_set(const char* key, int value) {
 }
 
 }  // namespace
+
+std::uint32_t duke_pc_controls_player_entity() { return g_trusted ? g_entity : 0u; }
 
 void duke_pc_controls_debug_mouse(int dx, int dy) {
     g_test_capture = true;

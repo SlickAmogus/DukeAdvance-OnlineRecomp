@@ -27,6 +27,7 @@
 #include "gba_bus.h"
 #include "gba_io.h"
 #include "mod_function_hooks.h"
+#include "pc_controls.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "scene/scene.h"
@@ -40,7 +41,7 @@ constexpr std::uint32_t kSegmentFn = 0x0801FABCu;    // called per wall segment 
 constexpr std::uint32_t kDrawPage = 0x0F04;          // IWRAM: pointer to the page being drawn
 constexpr std::uint32_t kMirrorPass = 0x28DC;        // IWRAM: non-zero during a mirror pass
 constexpr std::uint32_t kViewX = 0x2E64, kViewY = 0x2870, kViewZ = 0x2828, kViewAngle = 0x2820;
-constexpr std::uint32_t kPlayerPtr = 0x2C, kEntityAngle = 0x74;
+constexpr std::uint32_t kEntityAngle = 0x74;
 constexpr std::size_t kPageBytes = 240 * 160;
 
 DukeSceneSettings g_settings;
@@ -62,6 +63,7 @@ struct State {
     bool have_view = false;
     float x = 0, y = 0, z = 0;
     std::uint16_t angle = 0, entity_angle = 0;
+    bool have_entity_angle = false;
 } g_state;
 
 int page_index(std::uint32_t addr) {
@@ -72,10 +74,13 @@ bool in_bitmap_mode(gba::GbaBus* bus) {
     return (bus->io().read16(0x000) & 7u) == 4u;
 }
 
-std::uint16_t entity_angle(gba::GbaBus* bus) {
-    const std::uint32_t e = rd32(bus->iwram_ptr() + kPlayerPtr);
-    if (e < 0x02000000u || e > 0x0203FF00u) return 0;
-    return rd16(bus->ewram_ptr() + (e - 0x02000000u) + kEntityAngle);
+// The player's facing angle, or false while the player entity is not known
+// (IWRAM 0x2C is only "the entity being worked on"; see pc_controls.cpp).
+bool entity_angle(gba::GbaBus* bus, std::uint16_t* out) {
+    const std::uint32_t e = duke_pc_controls_player_entity();
+    if (e < 0x02000000u || e > 0x0203FF00u) return false;
+    *out = rd16(bus->ewram_ptr() + (e - 0x02000000u) + kEntityAngle);
+    return true;
 }
 
 // Makes a hooked function return to its caller without running its body.
@@ -117,7 +122,7 @@ int scene_end_hook(std::uint32_t, int, ArmCpuState* cpu) {
         g_state.y = static_cast<std::int32_t>(rd32(iw + kViewY)) / 256.0f;
         g_state.z = static_cast<std::int32_t>(rd32(iw + kViewZ)) / 256.0f;
         g_state.angle = rd16(iw + kViewAngle);
-        g_state.entity_angle = entity_angle(bus);
+        g_state.have_entity_angle = entity_angle(bus, &g_state.entity_angle);
         g_state.have_view = true;
     }
     return skip_function(cpu);
@@ -139,6 +144,7 @@ const int g_registered =
 
 // ---- compositing ---------------------------------------------------------------
 std::vector<std::uint32_t> g_frame;
+DukeSceneView g_last_view;   // camera of the most recent composite (debugging)
 
 struct Layout {
     int w = 0, h = 0;
@@ -309,8 +315,15 @@ bool compose(int out_w, int out_h) {
     o.view_x = g_state.x; o.view_y = g_state.y; o.view_z = g_state.z;
     // Follow the mouse between game ticks: the player's facing angle is
     // updated every display frame, the game's view angle only when it draws.
-    o.view_angle = static_cast<std::uint16_t>(
-        g_state.angle + static_cast<std::uint16_t>(entity_angle(bus) - g_state.entity_angle));
+    o.view_angle = g_state.angle;
+    std::uint16_t now = 0;
+    if (g_state.have_entity_angle && entity_angle(bus, &now)) {
+        // Only ever a fraction of a turn; anything larger is not mouse movement.
+        const std::int16_t lead = static_cast<std::int16_t>(now - g_state.entity_angle);
+        if (lead > -0x1800 && lead < 0x1800)
+            o.view_angle = static_cast<std::uint16_t>(g_state.angle + lead);
+    }
+    g_last_view = {o.view_x, o.view_y, o.view_z, o.view_angle};
     g_frame.resize(static_cast<std::size_t>(out_w) * out_h);
     if (!dukescene::render(mem, o, g_frame.data())) return false;
 
@@ -352,6 +365,8 @@ void duke_scene_frame_start() {
     if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
     if (!g_settings.native) g_runtime_cycle_discount_shift = 0;
 }
+
+DukeSceneView duke_scene_debug_view() { return g_last_view; }
 
 bool duke_scene_debug_shot(const char* path, int width, int height) {
     if (!compose(width, height)) return false;

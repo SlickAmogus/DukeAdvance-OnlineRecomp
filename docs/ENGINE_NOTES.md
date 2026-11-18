@@ -95,7 +95,9 @@ The teleporter shimmer is the game indexing its light tables with level
 | `0x03002E64`, `0x03002870`, `0x03002828` | View x, y, z (24.8 fixed) |
 | `0x03002820` | View angle (u16, 0x10000 = 360 degrees). Forward = (sin a, cos a), right = (cos a, -sin a) |
 | `0x03002850`, `0x03002EF8` | Forward vector x510 and right vector x128 |
-| `0x0300002C` | Pointer to the player entity; +0x40/+0x44 x,y, +0x74 angle |
+| `0x0300002C` | Pointer to the entity the game is working on. Usually the player, but **not always** (bullets, enemies mid-update): never write through it blindly. Entity fields: +0x40/+0x44 x,y, +0x74 angle |
+| `0x0300105C` | Entity array; the first record is the player |
+| `0x0201574C`, `0x03000110` | Pistol ammunition (level 1) |
 | `0x03002F10` | Look pitch (horizon offset in pixels) |
 | `0x03000F04` | Pointer to the bitmap page being drawn (`0x06000000` or `0x0600A000`) |
 | `0x030028DC` | Non-zero during a mirror pass |
@@ -159,6 +161,11 @@ one-sided) are specialised per wall by rewriting their own instructions:
 The recompiler patches in `patches/0003` and `0004` let its byte-verified RAM
 templates match all of these forms; `recomp.toml` seeds the code after each
 slot. With that the interpreter no longer runs during play.
+
+## Controls
+
+B fires, A jumps, L/R strafe, Select switches weapon, Start pauses. The pistol
+fires twice a second whether the button is held or tapped.
 
 ## Frame pacing
 
