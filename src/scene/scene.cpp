@@ -31,6 +31,7 @@ constexpr std::uint32_t kViewX = 0x03002E64, kViewY = 0x03002870, kViewZ = 0x030
 constexpr std::uint32_t kColormaps = 0x03002E6C, kAnimTable = 0x03000D94,
                         kLightTimer = 0x03002F44, kSpriteBase = 0x0300105C,
                         kPlayer = 0x0300002C, kScrollY = 0x03002E50, kScrollX = 0x03002E68;
+constexpr std::uint32_t kRemapTables = 0x03002A40;   // three 256-byte sprite remaps
 constexpr std::uint32_t kTexDir = 0x08280E64, kSpecialLight = 0x08035F94,
                         kFlickerTable = 0x08035F74;
 constexpr int kTexCount = 1252;
@@ -113,8 +114,22 @@ const Texture* texture(const Guest& g, int index, bool masked) {
                 y0 = g.u8(p + 1); y1 = std::min<int>(g.u8(p + 2), h); p += 3;
             }
             if (y1 <= y0) continue;
+            std::uint8_t* col = &tex->px[static_cast<std::size_t>(x) * h];
             if (const auto* src = g.at(p, static_cast<std::size_t>(y1 - y0)))
-                std::memcpy(&tex->px[static_cast<std::size_t>(x) * h + y0], src, y1 - y0);
+                std::memcpy(col + y0, src, y1 - y0);
+            if (!masked) continue;
+            // A transparent run is stored as 00 0A <row it ends at>, repeated
+            // every 8 bytes through the run. Index 0x0A is never a real pixel.
+            for (int y = y0; y < y1;) {
+                if (col[y] == 0 && y + 2 < y1 && col[y + 1] == 0x0A) {
+                    int end = col[y + 2];
+                    if (end <= y + 1 || end > y1) end = std::min(y1, y + 8);
+                    std::memset(col + y, 0, static_cast<std::size_t>(end - y));
+                    y = end;
+                } else {
+                    ++y;
+                }
+            }
         }
     }
     const Texture* out = tex.release();
@@ -157,7 +172,8 @@ struct SpriteDraw {
     float tx, tz, z_bottom, scale;
     const Texture* tex;
     int light;
-    bool translucent;
+    int remap;      // 1..3: extra palette remap table (tinted sprites)
+    bool sparkle;   // teleporter shimmer
 };
 
 struct MaskedSeg {
@@ -182,6 +198,7 @@ struct Frame {
     int scroll_x = 0, scroll_y = 0;
     std::vector<Sector> sector;
     std::vector<std::uint32_t> lut;            // [light level][palette index] -> ARGB
+    std::uint32_t palette[256] = {};           // palette index -> ARGB
     std::vector<float> row_inv;                // focal / (horizon - row centre)
     std::uint32_t* color = nullptr;            // column-major
     float* depth = nullptr;                    // column-major
@@ -515,8 +532,9 @@ void Band::subsector(int index) {
                         if (f10 & 4) light = 0;
                         if (f0 & 0x80) light = 0x21;
                         s.light = light;
-                        s.translucent = (f10 & 0x30) != 0;
-                        if (!(f10 & 2)) sprites.push_back(s);
+                        s.remap = static_cast<int>((f10 >> 4) & 3);
+                        s.sparkle = (f10 & 2) != 0;
+                        sprites.push_back(s);
                     }
                 }
             }
@@ -576,6 +594,20 @@ void Band::draw_sprite(const SpriteDraw& s) {
     const int yb = std::min(f.h, static_cast<int>(std::ceil(bottom - 0.5f)));
     if (xa >= xb || ya >= yb) return;
     const std::uint32_t* lut = f.lut_for(s.light);
+    std::uint32_t special[256];
+    if (s.sparkle) {
+        // The game indexes its light tables with an out-of-range level here,
+        // which lands in sprite attribute memory: the shimmer is that data.
+        for (int i = 0; i < 256; ++i)
+            special[i] = f.g.m.oam ? f.palette[f.g.m.oam[(0x264 + i) & 0x3FF]] : lut[i];
+        lut = special;
+    } else if (s.remap) {
+        const std::uint8_t* table = f.g.at(kRemapTables + (s.remap - 1) * 0x100, 0x100);
+        if (table) {
+            for (int i = 0; i < 256; ++i) special[i] = lut[table[i]];
+            lut = special;
+        }
+    }
     const float du = t->w / width, dv = t->h / height;
     for (int x = xa; x < xb; ++x) {
         const int u = std::clamp(static_cast<int>((static_cast<float>(x) + 0.5f - left) * du), 0, t->w - 1);
@@ -587,12 +619,7 @@ void Band::draw_sprite(const SpriteDraw& s) {
             if (v < 0 || v >= t->h) continue;
             const std::uint8_t p = col[v];
             if (!p || s.tz >= d[y]) continue;
-            if (s.translucent) {
-                const std::uint32_t a = lut[p], b = c[y];
-                c[y] = 0xFF000000u | (((a & 0xFEFEFE) + (b & 0xFEFEFE)) >> 1);
-            } else {
-                c[y] = lut[p];
-            }
+            c[y] = lut[p];
         }
     }
 }
@@ -636,7 +663,9 @@ bool setup(Frame& f, const Memory& mem, const Options& o) {
 
     f.w = o.width; f.h = o.height;
     f.vx = g.s32(kViewX) / 256.0f; f.vy = g.s32(kViewY) / 256.0f; f.vz = g.s32(kViewZ) / 256.0f;
-    const float a = g.u16(kViewAngle) * (6.28318530718f / 65536.0f);
+    std::uint16_t angle = g.u16(kViewAngle);
+    if (o.use_view) { f.vx = o.view_x; f.vy = o.view_y; f.vz = o.view_z; angle = o.view_angle; }
+    const float a = angle * (6.28318530718f / 65536.0f);
     f.fx = std::sin(a); f.fy = std::cos(a);
     f.rx = std::cos(a); f.ry = -std::sin(a);
     const float scale = static_cast<float>(f.h) / 160.0f;
@@ -655,7 +684,7 @@ bool setup(Frame& f, const Memory& mem, const Options& o) {
 
     const std::uint32_t maps = g.u32(kColormaps);
     f.lut.assign(static_cast<std::size_t>(kLightLevels) * 256, 0xFF000000u);
-    std::uint32_t pal[256];
+    std::uint32_t* pal = f.palette;
     for (int i = 0; i < 256; ++i) {
         std::uint16_t c; std::memcpy(&c, mem.palette + i * 2, 2);
         const std::uint32_t r = c & 31, gr = (c >> 5) & 31, b = (c >> 10) & 31;

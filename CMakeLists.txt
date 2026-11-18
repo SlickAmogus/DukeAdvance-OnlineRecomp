@@ -26,7 +26,8 @@ gbarecomp_add_runtime_target(DukeAdvanceRecomp
     WINDOW_TITLE "Duke Nukem Advance"
     DEFAULT_GAME_CONFIG_PATH "game.toml"
 )
-target_sources(DukeAdvanceRecomp PRIVATE src/main.cpp src/debug_watch.cpp src/pc_controls.cpp)
+target_sources(DukeAdvanceRecomp PRIVATE src/main.cpp src/debug_watch.cpp src/pc_controls.cpp
+    src/scene_host.cpp src/scene/scene.cpp)
 target_include_directories(DukeAdvanceRecomp PRIVATE
     "${RECOMP_UI_ROOT}/src" ${SDL2_INCLUDE_DIR})
 # Executable icon (assets/icon.ico, made from assets/icon.png). SDL also uses

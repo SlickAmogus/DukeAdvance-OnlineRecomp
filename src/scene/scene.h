@@ -17,6 +17,7 @@ struct Memory {
     const std::uint8_t* rom = nullptr;      // 0x08000000
     std::size_t rom_size = 0;
     const std::uint8_t* palette = nullptr;  // 0x05000000, BG palette (512 bytes)
+    const std::uint8_t* oam = nullptr;      // 0x07000000, 1 KiB (optional)
 };
 
 struct Options {
@@ -29,6 +30,11 @@ struct Options {
     bool sprites = true;
     // Extra fractional look pitch (in 160-line pixels) on top of the game's.
     float pitch_offset = 0.0f;
+    // Camera to use instead of the game's current view globals (which a
+    // mirror pass changes temporarily). Angle: 0x10000 = 360 degrees.
+    bool use_view = false;
+    float view_x = 0, view_y = 0, view_z = 0;
+    std::uint16_t view_angle = 0;
 };
 
 // True when a level is loaded and the game is in its 3D view.

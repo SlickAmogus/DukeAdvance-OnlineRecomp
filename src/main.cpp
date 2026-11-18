@@ -5,6 +5,7 @@
 #include "runtime.h"
 #include "debug_watch.h"
 #include "pc_controls.h"
+#include "scene_host.h"
 
 #include <cstring>
 #include <string>
@@ -33,6 +34,7 @@ int main(int argc, char** argv) {
     opts.freely_resizable_window = true;
     opts.show_fps_by_default = true;
     opts.tcp_command = duke_debug_tcp_command;
+    duke_scene_install(&opts);
     duke_pc_controls_install(&opts, argv[0]);
 
     std::vector<std::string> remembered;

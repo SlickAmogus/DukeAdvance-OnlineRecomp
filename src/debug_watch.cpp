@@ -10,6 +10,7 @@
 // engineering aid only; nothing in normal play installs it.
 #include "debug_watch.h"
 #include "pc_controls.h"
+#include "scene_host.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,16 @@ int duke_debug_tcp_command(const char* request,
         duke_pc_controls_debug_mouse(neg ? -static_cast<int>(dx) : static_cast<int>(dx),
                                      negy ? -static_cast<int>(dy) : static_cast<int>(dy));
         reply("{\"ok\":true}");
+        return 1;
+    }
+    if (std::strstr(request, "\"duke_scene_shot\"")) {
+        // {"cmd":"duke_scene_shot","w":1720,"h":720,"native":1} -> scene_shot.ppm
+        unsigned long long w = 960, h = 640, native = 1;
+        find_uint(request, "\"w\"", &w);
+        find_uint(request, "\"h\"", &h);
+        if (find_uint(request, "\"native\"", &native)) duke_scene_settings()->native = native != 0;
+        const bool ok = duke_scene_debug_shot("scene_shot.ppm", static_cast<int>(w), static_cast<int>(h));
+        reply(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"not in the 3D view\"}");
         return 1;
     }
     if (std::strstr(request, "\"duke_watch_log\"")) {

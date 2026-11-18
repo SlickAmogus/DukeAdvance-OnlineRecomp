@@ -22,6 +22,7 @@
 // a stretch of gameplay has been validated against them, so a stale pointer
 // outside gameplay is never written through.
 #include "pc_controls.h"
+#include "scene_host.h"
 
 #include <SDL.h>
 
@@ -49,6 +50,9 @@ constexpr char kKeySensitivity[] = "duke.mouse_sensitivity";
 constexpr char kKeyInvertY[]     = "duke.mouse_invert_y";
 constexpr char kKeyWasd[]        = "duke.wasd";
 constexpr char kKeyFilter[]      = "duke.filter";
+constexpr char kKeyNative[]      = "duke.native_renderer";
+constexpr char kKeyResolution[]  = "duke.resolution";
+constexpr char kKeyFov[]         = "duke.fov";
 
 struct Settings {
     int mouse_aim = 1;
@@ -82,6 +86,11 @@ void load_settings(const char* argv0) {
             g_settings.fullscreen = value < 0 ? 0 : value > 2 ? 2 : value;
         else if (!std::strcmp(key, "filter"))
             g_settings.filter = value < 0 ? 0 : value > 2 ? 2 : value;
+        else if (!std::strcmp(key, "native_renderer")) duke_scene_settings()->native = value != 0;
+        else if (!std::strcmp(key, "resolution"))
+            duke_scene_settings()->resolution = value < 0 ? 0 : value > 4 ? 4 : value;
+        else if (!std::strcmp(key, "fov"))
+            duke_scene_settings()->fov_percent = value < 70 ? 70 : value > 140 ? 140 : value;
     }
     std::fclose(f);
 }
@@ -89,11 +98,14 @@ void load_settings(const char* argv0) {
 void save_settings() {
     std::FILE* f = std::fopen(g_settings_path.c_str(), "w");
     if (!f) return;
+    const DukeSceneSettings& scene = *duke_scene_settings();
     std::fprintf(f, "mouse_aim = %d\nmouse_sensitivity = %d\nwasd = %d\n"
-                    "mouse_invert_y = %d\nfullscreen = %d\nfilter = %d\n",
+                    "mouse_invert_y = %d\nfullscreen = %d\nfilter = %d\n"
+                    "native_renderer = %d\nresolution = %d\nfov = %d\n",
                  g_settings.mouse_aim, g_settings.sensitivity, g_settings.wasd,
                  g_settings.invert_y,
-                 g_settings.fullscreen, g_settings.filter);
+                 g_settings.fullscreen, g_settings.filter,
+                 scene.native, scene.resolution, scene.fov_percent);
     std::fclose(f);
 }
 
@@ -232,6 +244,7 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
     g_in_gameplay.store(angle_p != nullptr, std::memory_order_relaxed);
     // run_game() clears this hook on entry, so it is (re)installed from here.
     g_runtime_thumb_alu_imm_override = recentre_override;
+    duke_scene_frame_start();
     const int dx = g_mouse_dx.exchange(0, std::memory_order_relaxed);
     const int dy = g_mouse_dy.exchange(0, std::memory_order_relaxed);
     if (!angle_p || !g_settings.mouse_aim || !g_captured) {
@@ -297,7 +310,22 @@ std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
 // ── settings-menu rows ──────────────────────────────────────────────────────
 const char* const kFilterChoices[] = {"Sharp pixels", "Smooth", "Sharp-bilinear"};
 
+const char* const kResolutionChoices[] = {"Window (sharpest)", "75%", "50%", "33%", "25% (chunky)"};
+
 const RecompRuntimeUiItem kItems[] = {
+    {kKeyNative, "Graphics", "Native renderer",
+     "Draw the 3D view on the PC at the window's own resolution and shape "
+     "(16:9, 21:9, anything) instead of stretching the 240x160 original. "
+     "Turn off for the untouched GBA picture.",
+     RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
+    {kKeyResolution, "Graphics", "Render resolution",
+     "Resolution of the native 3D view relative to the window. Lower values "
+     "are faster and give a chunkier, more retro look.",
+     RECOMP_RUNTIME_UI_CHOICE, 0, 4, 1, kResolutionChoices, 5, nullptr},
+    {kKeyFov, "Graphics", "Field of view (%)",
+     "100 keeps the game's vertical field of view; wider windows already see "
+     "more to the sides. Higher values zoom out.",
+     RECOMP_RUNTIME_UI_INT, 70, 140, 5, nullptr, 0, nullptr},
     {kKeyMouseAim, "Controls", "Mouse aim",
      "Turn and look up/down with the mouse during gameplay. Left click fires, "
      "right click jumps. Open this menu (Esc) to free the cursor.",
@@ -323,6 +351,9 @@ int ui_get(const char* key, int* out) {
     else if (!std::strcmp(key, kKeyWasd)) *out = g_settings.wasd;
     else if (!std::strcmp(key, kKeyInvertY)) *out = g_settings.invert_y;
     else if (!std::strcmp(key, kKeyFilter)) *out = g_settings.filter;
+    else if (!std::strcmp(key, kKeyNative)) *out = duke_scene_settings()->native;
+    else if (!std::strcmp(key, kKeyResolution)) *out = duke_scene_settings()->resolution;
+    else if (!std::strcmp(key, kKeyFov)) *out = duke_scene_settings()->fov_percent;
     else return 0;
     return 1;
 }
@@ -335,6 +366,11 @@ int ui_set(const char* key, int value) {
     else if (!std::strcmp(key, kKeyInvertY)) g_settings.invert_y = value != 0;
     else if (!std::strcmp(key, kKeyFilter))
         g_settings.filter = value < 0 ? 0 : value > 2 ? 2 : value;
+    else if (!std::strcmp(key, kKeyNative)) duke_scene_settings()->native = value != 0;
+    else if (!std::strcmp(key, kKeyResolution))
+        duke_scene_settings()->resolution = value < 0 ? 0 : value > 4 ? 4 : value;
+    else if (!std::strcmp(key, kKeyFov))
+        duke_scene_settings()->fov_percent = value < 70 ? 70 : value > 140 ? 140 : value;
     else return 0;
     save_settings();
     return 1;

@@ -42,3 +42,13 @@ note = "pitch recentre guard (positive side)"
 [[thumb_alu_immediate_override]]
 addr = 0x0801C3FA
 note = "pitch recentre guard (negative side)"
+
+# Native renderer seam (src/scene_host.cpp). 0x08022EF8 is the sprite drawer,
+# the last step of the game's scene pass. While the native renderer is on the
+# hook replaces it by clearing the bitmap page, so that everything the game
+# draws afterwards (weapon, messages) can be told apart from the 3D view. With
+# the hook disabled or declining, the original function runs unchanged.
+[[mod_function_hook]]
+addr = 0x08022EF8
+mode = "thumb"
+note = "end of scene pass: native renderer overlay separation"
