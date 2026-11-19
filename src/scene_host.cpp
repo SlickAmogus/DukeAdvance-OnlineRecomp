@@ -19,6 +19,7 @@
 #include "scene_host.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -195,6 +196,10 @@ void draw_bitmap_overlay(const Layout& l, const std::uint8_t* page, const std::u
 // Everything below the band - the gun, the crosshair - belongs to the 3D view
 // and stays centred with it.
 constexpr int kHudBandBottom = 46, kHudLeftEnd = 68, kHudRightStart = 172;
+// While one of the game's menus is up (pause, map...) nothing on screen is a
+// status box: its title sits in the same band and must stay centred.
+std::atomic<bool> g_menu_active{false};
+std::atomic<unsigned> g_native_presents{0};
 
 float hud_x(const Layout& l, int gx, bool top_band) {
     if (!top_band) return l.box_x + gx * l.scale;
@@ -240,7 +245,7 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt) {
                 pc = static_cast<std::int16_t>(rd16(oam + grp + 22));
                 pd = static_cast<std::int16_t>(rd16(oam + grp + 30));
             }
-            const bool top_band = sy + bh <= kHudBandBottom;
+            const bool top_band = sy + bh <= kHudBandBottom && !g_menu_active.load(std::memory_order_relaxed);
             for (int y = 0; y < bh; ++y) {
                 const int gy = sy + y;
                 if (gy < 0 || gy >= 160) continue;
@@ -372,6 +377,7 @@ int present_frame(gbarecomp::RunOptions::PresentFrame* frame) {
     frame->argb = g_frame.data();
     frame->width = static_cast<unsigned>(w);
     frame->height = static_cast<unsigned>(h);
+    g_native_presents.fetch_add(1, std::memory_order_relaxed);
     return 1;
 }
 
@@ -391,6 +397,10 @@ void duke_scene_frame_start() {
 }
 
 DukeSceneView duke_scene_debug_view() { return g_last_view; }
+
+void duke_scene_set_menu_active(bool active) { g_menu_active.store(active, std::memory_order_relaxed); }
+
+unsigned duke_scene_native_presents() { return g_native_presents.load(std::memory_order_relaxed); }
 
 bool duke_scene_debug_shot(const char* path, int width, int height) {
     if (!compose(width, height)) return false;

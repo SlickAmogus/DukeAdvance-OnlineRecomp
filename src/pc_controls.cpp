@@ -27,6 +27,7 @@
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -194,10 +195,22 @@ void update_capture() {
     }
 }
 
+extern std::atomic<int> g_left_clicks, g_right_clicks, g_wheel;
+
 int SDLCALL event_watch(void*, SDL_Event* e) {
     if (e->type == SDL_MOUSEMOTION && g_captured) {
         g_mouse_dx.fetch_add(e->motion.xrel, std::memory_order_relaxed);
         g_mouse_dy.fetch_add(e->motion.yrel, std::memory_order_relaxed);
+    }
+    // Clicks and wheel notches for the game's menus. Only while the game is
+    // taking input (not behind the Esc menu) and the mouse is not aiming.
+    if (!g_captured && play_is_live()) {
+        if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT)
+            g_left_clicks.fetch_add(1, std::memory_order_relaxed);
+        else if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_RIGHT)
+            g_right_clicks.fetch_add(1, std::memory_order_relaxed);
+        else if (e->type == SDL_MOUSEWHEEL && e->wheel.y != 0)
+            g_wheel.fetch_add(e->wheel.y > 0 ? 1 : -1, std::memory_order_relaxed);
     }
     // Only for events that come from the window's own thread; controller and
     // audio events are delivered from SDL's worker threads.
@@ -334,8 +347,13 @@ int player_update_hook(std::uint32_t, int, ArmCpuState*) {
     return 0;
 }
 
+int menu_update_hook(std::uint32_t, int, ArmCpuState* cpu);
+bool menu_is_live();
+
 const int g_mouse_hook_registered =
-    gba_mod_register_function_entry_plugin(kMouseHookId, kPlayerUpdateFn, 1, player_update_hook);
+    gba_mod_register_function_entry_plugin(kMouseHookId, kPlayerUpdateFn, 1, player_update_hook) &&
+    gba_mod_register_function_entry_plugin(kMouseHookId, 0x08013924u, 1, menu_update_hook) &&
+    gba_mod_register_function_entry_plugin(kMouseHookId, 0x08016794u, 1, menu_update_hook);
 
 // Start of every display frame. Decides whether the game is in live play: it
 // is while it is in its 3D mode and has run the player update within the last
@@ -350,6 +368,7 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
     g_runtime_thumb_alu_imm_override = recentre_override;
     if (g_mouse_hook_registered) gba_mod_set_function_hook_enabled(kMouseHookId, 1);
     duke_scene_frame_start();
+    duke_scene_set_menu_active(!g_trusted && menu_is_live());
     if (!g_trusted || !aiming()) {
         // Nothing is going to consume mouse movement: do not let it pile up
         // and swing the view when aim resumes.
@@ -360,13 +379,296 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo* info) {
     }
 }
 
+// ── the game's own menus: mouse pointing ────────────────────────────────────
+// Every menu in the game (main, difficulty, save slots, pause...) is run by
+// one handler, 0x08013924, called once per frame with the menu in r0. The
+// options list has its own, 0x08016794, with the same argument and state.
+// Guest facts (AD9P):
+//
+//   menu + 0x18            item count
+//   menu + 0x1C + lang*4   item table for that language, 0x18 bytes per item:
+//                          +4 action (0 = a value changed with Left/Right),
+//                          +0xC flags (bit 0 = can be selected). A field
+//                          holding 9999 means "same as the first language".
+//   IWRAM 0x030011D0       selected item (-1 = none)
+//   IWRAM 0x030011F0       one sprite object pointer per item; object +0xE /
+//                          +0x12 = position, +0x44 / +0x46 = the byte range
+//                          of its pieces in OAM as drawn last frame,
+//                          +0xC bit 4 = hidden (an entry that is switched off)
+//   EWRAM 0x02002CA4       the sprite list being built: a write pointer, then
+//                          OAM entries (copied to the hardware next VBlank)
+//   IWRAM 0x030011A0       1 = Start (not A) activates the item (title screen)
+//   IWRAM 0x03000EA6       language index
+//
+// The mouse never writes any of this. Pointing at an item taps Up/Down until
+// the game's own selection gets there, a click then taps A, so sounds,
+// animations and disabled items behave exactly as with the pad.
+constexpr std::uint32_t kMenuSelected = 0x11D0, kMenuObjects = 0x11F0;
+constexpr std::uint32_t kMenuStartConfirms = 0x11A0, kLanguage = 0x0EA6;
+constexpr std::uint32_t kSameAsFirstLanguage = 9999;
+constexpr std::uint32_t kOamShadow = 0x02002CA4u;   // EWRAM: write pointer, then 128 entries
+constexpr int kMaxMenuItems = 16;
+enum { kBitA = 0, kBitB = 1, kBitStart = 3, kBitRight = 4, kBitLeft = 5, kBitUp = 6, kBitDown = 7 };
+
+std::uint32_t g_menu = 0;               // menu the handler last ran for
+std::uint64_t g_menu_frame = 0;         // display frame it last ran in
+std::atomic<int> g_left_clicks{0}, g_right_clicks{0}, g_wheel{0};
+std::atomic<int> g_test_pointer_x{-1}, g_test_pointer_y{-1};
+std::atomic<bool> g_test_pointer{false};
+
+int menu_update_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    g_menu = cpu->R[0];
+    g_menu_frame = g_frame;
+    return 0;
+}
+
+bool menu_is_live() { return g_menu != 0 && g_frame - g_menu_frame <= 3; }
+
+struct MenuItem {
+    bool selectable = false, has_action = false, has_rect = false;
+    int x = 0, y = 0;                   // sprite position
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0; // what it covers on the GBA screen
+};
+
+std::uint16_t rd16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
+
+// Reads the live menu's items and where they are on screen. Returns the item
+// count (0 if the menu cannot be read).
+int read_menu(gba::GbaBus* bus, MenuItem* items, int* selected) {
+    constexpr std::uint32_t kRomSize = 0x00800000u;
+    const std::uint8_t* rom = bus->rom_ptr();
+    const std::uint8_t* iwram = bus->iwram_ptr();
+    auto in_rom = [&](std::uint32_t a, std::uint32_t len) {
+        return a >= 0x08000000u && a - 0x08000000u + len <= kRomSize;
+    };
+    if (!in_rom(g_menu, 0x34)) return 0;
+    const std::uint8_t* menu = rom + (g_menu - 0x08000000u);
+    const std::uint32_t count = rd32(menu + 0x18);
+    if (count == 0 || count > kMaxMenuItems) return 0;
+    const std::uint32_t first = rd32(menu + 0x1C);
+    std::uint32_t local = rd32(menu + 0x1C + (iwram[kLanguage] & 3u) * 4u);
+    if (!in_rom(first, count * 0x18)) return 0;
+    if (!in_rom(local, count * 0x18)) local = first;
+    *selected = static_cast<std::int32_t>(rd32(iwram + kMenuSelected));
+
+    // The ranges index the list the game built this frame, which reaches the
+    // screen one frame later: read that list, not the hardware OAM, or the
+    // boxes belong to last frame's draw order.
+    const std::uint8_t* oam = bus->ewram_ptr() + (kOamShadow - 0x02000000u) + 4;
+    const std::uint32_t oam_end = rd32(oam - 4);
+    if (oam_end < kOamShadow + 4 || oam_end > kOamShadow + 4 + 128 * 8) oam = bus->oam_ptr();
+    static const std::uint8_t kSize[3][4][2] = {
+        {{8, 8}, {16, 16}, {32, 32}, {64, 64}},
+        {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
+        {{8, 16}, {8, 32}, {16, 32}, {32, 64}}};
+    for (std::uint32_t i = 0; i < count; ++i) {
+        MenuItem& it = items[i];
+        it = MenuItem{};
+        auto field = [&](std::uint32_t off) {
+            const std::uint32_t v = rd32(rom + (local - 0x08000000u) + i * 0x18 + off);
+            return v == kSameAsFirstLanguage ? rd32(rom + (first - 0x08000000u) + i * 0x18 + off) : v;
+        };
+        it.selectable = field(0xC) & 1u;
+        it.has_action = field(4) != 0;
+        const std::uint32_t obj = rd32(iwram + kMenuObjects + i * 4);
+        if (obj < 0x02000000u || obj > 0x0203FF00u) continue;
+        const std::uint8_t* o = bus->ewram_ptr() + (obj - 0x02000000u);
+        it.x = static_cast<std::int16_t>(rd16(o + 0xE));
+        it.y = static_cast<std::int16_t>(rd16(o + 0x12));
+        // Bit 4 of the object's flags: not drawn. The game uses it for entries
+        // it will not let you select (MULTIPLAYER without a link cable); its
+        // OAM range is then left over from whatever used the object before.
+        if (o[0xC] & 0x10) { it.selectable = false; continue; }
+        const unsigned a = rd16(o + 0x44) / 8u, b = rd16(o + 0x46) / 8u;
+        if (a >= b || b > 128) continue;
+        bool any = false;
+        for (unsigned k = a; k < b; ++k) {
+            const std::uint16_t a0 = rd16(oam + k * 8), a1 = rd16(oam + k * 8 + 2);
+            if ((a0 & 0x300) == 0x200 || (a0 >> 14) == 3) continue;
+            int sy = a0 & 0xFF, sx = a1 & 0x1FF;
+            if (sy >= 160) sy -= 256;
+            if (sx >= 240) sx -= 512;
+            const int w = kSize[a0 >> 14][a1 >> 14][0], h = kSize[a0 >> 14][a1 >> 14][1];
+            if (!any) { it.x0 = sx; it.y0 = sy; it.x1 = sx + w; it.y1 = sy + h; any = true; }
+            else {
+                it.x0 = std::min(it.x0, sx); it.y0 = std::min(it.y0, sy);
+                it.x1 = std::max(it.x1, sx + w); it.y1 = std::max(it.y1, sy + h);
+            }
+        }
+        // An item that was not drawn this frame keeps a stale range that now
+        // belongs to other sprites; those pieces are nowhere near it.
+        it.has_rect = any && it.x >= it.x0 - 8 && it.x <= it.x1 + 8 &&
+                      it.y >= it.y0 - 8 && it.y <= it.y1 + 8;
+        // Text rows are only 8 pixels tall: a little slack around every item.
+        it.x0 -= 2; it.y0 -= 2; it.x1 += 2; it.y1 += 2;
+    }
+    return static_cast<int>(count);
+}
+
+// One key tap at a time: held for a few frames, then released for a few, so
+// the game sees a clean press each time.
+int g_tap_bit = -1, g_tap_timer = 0;
+constexpr int kTapHold = 3, kTapGap = 3;
+bool tap_idle() { return g_tap_timer == 0; }
+void tap(int bit) { g_tap_bit = bit; g_tap_timer = kTapHold + kTapGap; }
+
+struct Pointer { bool present = false; float x = 0, y = 0; };
+
+// Where the mouse is on the GBA screen.
+Pointer read_pointer(const gbarecomp::TouchFrameInfo* info, bool native_view) {
+    Pointer p;
+    if (g_test_pointer.load(std::memory_order_relaxed)) {
+        p.present = true;
+        p.x = static_cast<float>(g_test_pointer_x.load(std::memory_order_relaxed));
+        p.y = static_cast<float>(g_test_pointer_y.load(std::memory_order_relaxed));
+        return p;
+    }
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) return p;
+    SDL_Window* w = SDL_GetMouseFocus();
+    if (!w || w != SDL_GetKeyboardFocus()) return p;
+    int mx = 0, my = 0, ww = 0, wh = 0;
+    SDL_GetMouseState(&mx, &my);
+    SDL_GetWindowSize(w, &ww, &wh);
+    if (ww <= 0 || wh <= 0 || info->drawable_width <= 0 || info->drawable_height <= 0) return p;
+    const float dx = (mx + 0.5f) * info->drawable_width / ww;
+    const float dy = (my + 0.5f) * info->drawable_height / wh;
+    if (native_view) {
+        // The native renderer fills the window: 160 lines tall, centred.
+        const float scale = info->drawable_height / 160.0f;
+        p.x = (dx - (info->drawable_width - 240.0f * scale) * 0.5f) / scale;
+        p.y = dy / scale;
+    } else {
+        float lx = 0, ly = 0;
+        gbarecomp::presentation_point_to_logical(info->game_rect, static_cast<int>(info->view_width),
+                                                 static_cast<int>(info->view_height), dx, dy, &lx, &ly);
+        p.x = lx - static_cast<float>(info->extra_left);
+        p.y = ly - static_cast<float>(info->extra_top);
+    }
+    p.present = true;
+    return p;
+}
+
+int item_under(const MenuItem* items, int count, const Pointer& p) {
+    int best = -1;
+    float best_d = 0;
+    for (int i = 0; i < count; ++i) {
+        const MenuItem& it = items[i];
+        if (!it.selectable || !it.has_rect) continue;
+        if (p.x < it.x0 || p.x >= it.x1 || p.y < it.y0 || p.y >= it.y1) continue;
+        const float cx = (it.x0 + it.x1) * 0.5f - p.x, cy = (it.y0 + it.y1) * 0.5f - p.y;
+        const float d = cx * cx + cy * cy;
+        if (best < 0 || d < best_d) { best = i; best_d = d; }
+    }
+    return best;
+}
+
+// Mouse handling whenever the game is not in live play: menus, briefings,
+// title and score screens. Adds its key taps to `keys`.
+void menu_mouse(const gbarecomp::TouchFrameInfo* info, std::uint16_t* keys, bool resumed) {
+    static unsigned last_presents = 0;
+    static int native_frames_left = 0;
+    static std::uint32_t last_menu = 0;
+    static float last_x = -1000, last_y = -1000;
+    static int want = -1;          // item the pointer asked for
+    static int click = -1;         // item waiting to be activated
+    static int budget = 0;         // taps left to get there
+    static int moving_from = -2;   // selection when the last Up/Down was sent
+    static int moving_wait = 0;    // frames left for the game to act on it
+    const unsigned presents = duke_scene_native_presents();
+    if (presents != last_presents) { last_presents = presents; native_frames_left = 4; }
+    else if (native_frames_left > 0) --native_frames_left;
+
+    int left = g_left_clicks.exchange(0, std::memory_order_relaxed);
+    int right = g_right_clicks.exchange(0, std::memory_order_relaxed);
+    int wheel = g_wheel.exchange(0, std::memory_order_relaxed);
+    const bool playing = g_in_gameplay.load(std::memory_order_relaxed) ||
+                         g_captured.load(std::memory_order_relaxed);
+    if (resumed || playing) { left = right = wheel = 0; want = click = -1; }
+
+    if (g_tap_timer > 0) {
+        if (g_tap_timer > kTapGap) *keys &= static_cast<std::uint16_t>(~(1u << g_tap_bit));
+        --g_tap_timer;
+    }
+    if (playing) return;
+
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    MenuItem items[kMaxMenuItems];
+    int selected = -1;
+    const int count = bus && menu_is_live() ? read_menu(bus, items, &selected) : 0;
+    if (g_menu != last_menu || !count) {
+        want = click = -1;
+        moving_wait = 0;
+        last_menu = count ? g_menu : 0;
+    }
+
+    if (!count) {
+        // No menu: any click continues (briefings, title, tallies), right
+        // click backs out, the wheel steps sideways (language flags).
+        if (!tap_idle()) return;
+        if (left > 0) tap(kBitA);
+        else if (right > 0) tap(kBitB);
+        else if (wheel != 0) tap(wheel > 0 ? kBitLeft : kBitRight);
+        return;
+    }
+
+    const Pointer p = read_pointer(info, native_frames_left > 0);
+    bool any_rect = false;
+    for (int i = 0; i < count; ++i) any_rect = any_rect || (items[i].selectable && items[i].has_rect);
+    const int confirm = bus->iwram_ptr()[kMenuStartConfirms] == 1 ? kBitStart : kBitA;
+    const int under = p.present ? item_under(items, count, p) : -1;
+    // A resting pointer leaves the selection to the keyboard and pad.
+    if (p.present && (std::fabs(p.x - last_x) >= 0.5f || std::fabs(p.y - last_y) >= 0.5f)) {
+        last_x = p.x; last_y = p.y;
+        if (under >= 0 && under != want) { want = under; budget = kMaxMenuItems * 2; }
+    }
+    if (left > 0) {
+        if (!any_rect) { if (tap_idle()) tap(confirm); }
+        else if (under >= 0) { want = click = under; budget = kMaxMenuItems * 2; }
+    }
+    if (!tap_idle()) return;
+    // The game can take several frames to act on a press (longer while a menu
+    // is sliding in): send the next one only once this one has landed.
+    if (moving_wait > 0) {
+        if (selected != moving_from) moving_wait = 0;
+        else { --moving_wait; return; }
+    }
+    if (right > 0) { tap(kBitB); want = click = -1; return; }
+    if (wheel != 0) {
+        // On a value (sound volume, gamma...) the wheel changes it; anywhere
+        // else it moves the selection.
+        const bool value = selected >= 0 && selected < count && items[selected].selectable &&
+                           !items[selected].has_action;
+        tap(value ? (wheel > 0 ? kBitRight : kBitLeft) : (wheel > 0 ? kBitUp : kBitDown));
+        want = click = -1;
+        return;
+    }
+    if (want >= 0 && want != selected) {
+        if (budget-- <= 0) { want = click = -1; return; }
+        tap(want > selected ? kBitDown : kBitUp);
+        moving_from = selected;
+        moving_wait = 30;
+        return;
+    }
+    if (click >= 0 && click == selected) {
+        tap(items[click].has_action ? confirm : kBitRight);
+        click = -1;
+    }
+    want = -1;
+}
+
 // GBA KEYINPUT bits (active low): 0=A 1=B 2=Select 3=Start 4=Right 5=Left
 // 6=Up 7=Down 8=R 9=L. In-game: B fires, A jumps, L/R strafe, Select
 // switches weapon (checked against the running game: holding B spends ammo,
 // tapping A lifts the view).
-std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
-    g_last_policy_ms.store(now_ms(), std::memory_order_relaxed);
+std::uint16_t input_frame(const gbarecomp::TouchFrameInfo* info) {
+    const std::uint32_t now = now_ms();
+    // Coming back from the Esc menu: clicks made in it are not for the game.
+    // (Scripted runs pause between commands; their clicks always count.)
+    const bool resumed = now - g_last_policy_ms.load(std::memory_order_relaxed) > 200u &&
+                         !g_test_pointer.load(std::memory_order_relaxed);
+    g_last_policy_ms.store(now, std::memory_order_relaxed);
     std::uint16_t keys = 0x03FF;
+    menu_mouse(info, &keys, resumed);
     if (!host_ready()) return keys;
     update_capture();
     remember_display_mode();
@@ -411,7 +713,9 @@ const RecompRuntimeUiItem kItems[] = {
      RECOMP_RUNTIME_UI_INT, 70, 140, 5, nullptr, 0, nullptr},
     {kKeyMouseAim, "Controls", "Mouse aim",
      "Turn and look up/down with the mouse during gameplay. Left click fires, "
-     "right click jumps. Open this menu (Esc) to free the cursor.",
+     "right click jumps. Open this menu (Esc) to free the cursor. In the "
+     "game's own menus the mouse always works: point and click, right click "
+     "goes back, the wheel changes values.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeySensitivity, "Controls", "Mouse sensitivity", "Higher turns faster.",
      RECOMP_RUNTIME_UI_INT, 1, 40, 1, nullptr, 0, nullptr},
@@ -479,6 +783,15 @@ void duke_pc_controls_debug_mouse(int dx, int dy) {
     g_captured.store(true, std::memory_order_relaxed);
     g_mouse_dx.fetch_add(dx, std::memory_order_relaxed);
     g_mouse_dy.fetch_add(dy, std::memory_order_relaxed);
+}
+
+void duke_pc_controls_debug_pointer(int x, int y, int left_clicks, int right_clicks, int wheel) {
+    g_test_pointer_x.store(x, std::memory_order_relaxed);
+    g_test_pointer_y.store(y, std::memory_order_relaxed);
+    g_test_pointer.store(true, std::memory_order_relaxed);
+    g_left_clicks.fetch_add(left_clicks, std::memory_order_relaxed);
+    g_right_clicks.fetch_add(right_clicks, std::memory_order_relaxed);
+    g_wheel.fetch_add(wheel, std::memory_order_relaxed);
 }
 
 void duke_pc_controls_startup_args(std::vector<std::string>* extra) {

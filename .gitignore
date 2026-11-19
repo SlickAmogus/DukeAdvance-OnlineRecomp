@@ -17,3 +17,4 @@ build-*/
 recomp_scan.toml
 duke_pc.ini
 __pycache__/
+*.zip

@@ -57,6 +57,11 @@ clang-mingw toolchain produced a crashing exe here with LLVM 18.
 `game.toml` holds the ROM and BIOS paths the exe uses; edit them for your
 machine.
 
+Every build ends by writing `build\DukeAdvance.zip` (`tools\package.ps1`): the
+exe, its DLLs and assets, your ROM and BIOS, and a `game.toml` that points at
+them by relative path. Extract it on any Windows PC and run the exe. It
+contains your ROM and BIOS, so keep it to your own machines; it is gitignored.
+
 ## Playing
 
 - **Esc** opens the options menu: display mode (windowed, borderless,
@@ -67,6 +72,11 @@ machine.
   fires, right click jumps. Sensitivity and invert-Y are under Controls. The
   cursor is released while the menu is open. Vertical look drives the game's
   own look pitch; its auto-recentre is off while mouse aim is enabled.
+- **Mouse in the game's menus**: point at an entry to select it, left click
+  to choose it, right click to go back. On a value (sound, music, gamma) a
+  click or wheel-up raises it and wheel-down lowers it; elsewhere the wheel
+  moves the selection. On screens without a menu (briefings, title) a click
+  continues; on the language screen the wheel changes the flag.
 - **WASD layout** (on by default): W/S move, A/D strafe, Space jumps, Left
   Ctrl fires, Q/E switch weapon. The original keys still work: arrows, Z (B,
   fire), X (A, jump), C (L), V (R), Enter (Start), Right Shift (Select).
@@ -94,7 +104,7 @@ original frame rate. Not handled natively yet: mirrors and skies.
 | Path | What |
 |---|---|
 | `src/main.cpp` | Host entry point |
-| `src/pc_controls.cpp` | Mouse aim, WASD layout, their menu rows and settings |
+| `src/pc_controls.cpp` | Mouse aim, mouse pointing in the game's menus, WASD layout, their menu rows and settings |
 | `src/scene/` | Native renderer (Doom-style software renderer over the game's level data) |
 | `src/scene_host.cpp` | Hooks the renderer into the game and composites weapon and HUD |
 | `src/debug_watch.cpp` | Debug-server helpers (RAM write watch, synthetic mouse, composite screenshot) |

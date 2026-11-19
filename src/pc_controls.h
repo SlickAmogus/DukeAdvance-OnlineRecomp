@@ -22,6 +22,10 @@ void duke_pc_controls_pending_aim(double* yaw_units, double* pitch_pixels);
 // Debug TCP only: feed synthetic mouse counts (headless testing).
 void duke_pc_controls_debug_mouse(int dx, int dy);
 
+// Debug TCP only: a synthetic pointer for the game's menus (headless testing).
+// x, y in GBA screen pixels; clicks and wheel notches are added to the queue.
+void duke_pc_controls_debug_pointer(int x, int y, int left_clicks, int right_clicks, int wheel);
+
 // Remembered display choices (fullscreen mode, scaling filter) as runtime CLI
 // flags. Call after duke_pc_controls_install(); skip for scripted runs.
 void duke_pc_controls_startup_args(std::vector<std::string>* extra);

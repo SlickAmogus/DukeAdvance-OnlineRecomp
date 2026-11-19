@@ -157,3 +157,18 @@ note = "wall segment about to be drawn (observed only)"
 addr = 0x0801BDCC
 mode = "thumb"
 note = "player update: mouse aim applied here (observed only)"
+
+# 0x08013924 is the game's shared menu input handler (r0 = the menu being
+# shown), run once per frame while any of its menus is on screen. Only
+# observed: it tells the PC mouse code that a menu is live and which one.
+[[mod_function_hook]]
+addr = 0x08013924
+mode = "thumb"
+note = "menu input handler: marks a menu as live for mouse pointing (observed only)"
+
+# 0x08016794 is the options list's own input handler (same argument, same
+# selection state as 0x08013924). Observed for the same reason.
+[[mod_function_hook]]
+addr = 0x08016794
+mode = "thumb"
+note = "options menu input handler: marks the menu as live for mouse pointing (observed only)"

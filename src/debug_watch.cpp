@@ -4,6 +4,8 @@
 //   {"cmd":"duke_watch_log"}                        dump + clear hits
 //   {"cmd":"duke_mouse","dx":50,"neg":0,"dy":9,"negy":1}   synthetic mouse counts
 //                                       (neg/negy = 1 makes that axis negative)
+//   {"cmd":"duke_pointer","x":120,"y":80,"l":1}   synthetic menu pointer (GBA
+//                                       pixels; l/r = clicks, wu/wd = wheel)
 //
 // While armed every RAM store goes through the bus (the native RAM fast path
 // stands down when an observer is installed), so it is slow. Reverse
@@ -61,6 +63,20 @@ int duke_debug_tcp_command(const char* request,
         find_uint(request, "\"negy\"", &negy);
         duke_pc_controls_debug_mouse(neg ? -static_cast<int>(dx) : static_cast<int>(dx),
                                      negy ? -static_cast<int>(dy) : static_cast<int>(dy));
+        reply("{\"ok\":true}");
+        return 1;
+    }
+    if (std::strstr(request, "\"duke_pointer\"")) {
+        // {"cmd":"duke_pointer","x":120,"y":80,"l":1,"r":0,"wu":0,"wd":0}
+        unsigned long long x = 0, y = 0, l = 0, r = 0, wu = 0, wd = 0;
+        find_uint(request, "\"x\"", &x);
+        find_uint(request, "\"y\"", &y);
+        find_uint(request, "\"l\"", &l);
+        find_uint(request, "\"r\"", &r);
+        find_uint(request, "\"wu\"", &wu);
+        find_uint(request, "\"wd\"", &wd);
+        duke_pc_controls_debug_pointer(static_cast<int>(x), static_cast<int>(y), static_cast<int>(l),
+                                       static_cast<int>(r), static_cast<int>(wu) - static_cast<int>(wd));
         reply("{\"ok\":true}");
         return 1;
     }

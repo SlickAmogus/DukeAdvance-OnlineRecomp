@@ -168,6 +168,38 @@ slot. With that the interpreter no longer runs during play.
 B fires, A jumps, L/R strafe, Select switches weapon, Start pauses. The pistol
 fires twice a second whether the button is held or tapped.
 
+## Menus
+
+All menus share one state block and one item format.
+
+- IWRAM `0x030011C0`: `+4` the menu being shown (ROM pointer), `+0x10` the
+  selected item (-1 = none), `+0x14` the previous selection.
+- Menu record: `+0`/`+4`/`+8` open, close and per-frame handlers, `+0xC` the
+  back (B) handler, `+0x18` item count, `+0x1C + language*4` the item table
+  for each of four languages, `+0x30` nonzero when Left/Right do not move the
+  selection.
+- Item, 0x18 bytes: `+0` sprite sheet, `+1`/`+2` plain and selected frame,
+  `+4` action (0 for a value changed with Left/Right), `+8` its argument,
+  `+0xC` flags (bit 0 selectable, bit 2 no sprite), `+0x10`/`+0x14` position.
+  A field holding 9999 means "same as the first language".
+- IWRAM `0x030011F0`: one sprite object pointer per item. Object `+8` frame,
+  `+0xC` flags (bit 4 hidden: used for MULTIPLAYER without a link, which the
+  game also refuses to keep selected), `+0xE`/`+0x12` position, `+0x44`/`+0x46`
+  the byte range of its pieces in the sprite list.
+- EWRAM `0x02002CA4`: the sprite list being built (write pointer, then OAM
+  entries); it is copied to the hardware OAM at the next VBlank, so object
+  ranges match this list and not what OAM holds at that moment.
+- `0x08013924` is the shared per-frame input handler (r0 = menu): Up/Left go
+  to the previous selectable item, Down/Right to the next, A runs the item's
+  action (Start instead when IWRAM `0x030011A0` is 1, as on the title), B the
+  back handler. The options list alone has its own, `0x08016794`.
+- IWRAM `0x03000EA6` is the language index. The language screen is not a menu
+  of this kind: Left/Right change that byte directly.
+
+Mouse pointing (`src/pc_controls.cpp`) observes the two handlers to know a
+menu is live, reads the item boxes from the sprite list, and only ever
+presses pad buttons.
+
 ## Frame pacing
 
 Before drawing the first wall of a frame the game waits in a loop

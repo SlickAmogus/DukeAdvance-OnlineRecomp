@@ -23,3 +23,11 @@ DukeSceneView duke_scene_debug_view();
 // Debug TCP only: write the current composite as a PPM. False when the game
 // is not in its 3D view.
 bool duke_scene_debug_shot(const char* path, int width, int height);
+
+// True while one of the game's own menus is on screen: sprites along the top
+// then stay centred instead of following the window edges like the HUD.
+void duke_scene_set_menu_active(bool active);
+
+// Number of frames presented by the native renderer so far. While it keeps
+// rising the picture fills the window: 160 lines tall, 240 columns centred.
+unsigned duke_scene_native_presents();

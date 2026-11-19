@@ -4,6 +4,9 @@
 #   .\build.ps1 -SkipRegen   build only
 #   .\build.ps1 -RealBios    recompile ../gbarecomp/bios/gba_bios.bin and link it
 #
+# Ends by packing build\DukeAdvance.zip, the self-contained copy for other
+# PCs. After an incremental `cmake --build`, run tools\package.ps1 by hand.
+#
 # Toolchain: MSYS2 MinGW64 GCC + Ninja. Do NOT use the framework's
 # clang-mingw toolchain here: with LLVM 18 + MinGW ld the runtime's
 # thread-locals get bogus TLS offsets and the exe segfaults on the first
@@ -46,3 +49,7 @@ if ($LASTEXITCODE) { throw 'configure failed' }
 & "$mingw\cmake.exe" --build "$root\build" --target DukeAdvanceRecomp --parallel
 if ($LASTEXITCODE) { throw 'build failed' }
 Write-Host "Built $root\build\DukeAdvanceRecomp.exe"
+
+# Every build also refreshes build\DukeAdvance.zip, the self-contained copy
+# for other PCs (see tools\package.ps1).
+& "$root\tools\package.ps1" -BuildDir "$root\build"
