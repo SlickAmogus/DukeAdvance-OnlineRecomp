@@ -871,6 +871,8 @@ void duke_pc_controls_startup_args(std::vector<std::string>* extra) {
     if (g_settings.filter == 2) { extra->push_back("--sharp-filter"); extra->push_back("1"); }
 }
 
+void duke_pc_controls_load_settings(const char* argv0) { load_settings(argv0); }
+
 void duke_pc_controls_install(gbarecomp::RunOptions* opts, const char* argv0) {
     load_settings(argv0);
     opts->extended_view_frame = frame_start;

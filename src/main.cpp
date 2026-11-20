@@ -80,13 +80,20 @@ int main(int argc, char** argv) {
     opts.show_fps_by_default = true;
     opts.tcp_command = tcp_command;
     // A link match runs both consoles on every PC and must stay identical on
-    // each: nothing that changes guest execution (native renderer hooks, mouse
-    // aim) is installed, only the pad reaches the game.
+    // each: nothing that changes guest execution (the single-player renderer
+    // hooks, mouse aim) is installed, only the pad reaches the game. The
+    // native renderer still draws the match, from a hook that only reads.
     if (!netplay) {
         duke_scene_install(&opts);
         duke_pc_controls_install(&opts, argv[0]);
         duke_menu_install(&opts, argc, argv, build_tag);
     }
+#if defined(DUKE_NETPLAY)
+    else {
+        duke_pc_controls_load_settings(argv[0]);
+        duke_scene_install_match(opts.netplay.get());
+    }
+#endif
 
     std::vector<std::string> remembered;
     if (!scripted && !display_flag) duke_pc_controls_startup_args(&remembered);

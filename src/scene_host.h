@@ -13,6 +13,11 @@ DukeSceneSettings* duke_scene_settings();
 // Installs the present-time compositor. Call before gbarecomp::run_game().
 void duke_scene_install(gbarecomp::RunOptions* opts);
 
+// Link matches: the native renderer from a read-only hook (the consoles must
+// stay identical on both PCs, so nothing changes what the game runs).
+namespace gbarecomp { struct GbaNetplayLaunch; }
+void duke_scene_install_match(gbarecomp::GbaNetplayLaunch* launch);
+
 // Call once per emulated frame (keeps the scene hook armed).
 void duke_scene_frame_start();
 

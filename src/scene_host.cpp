@@ -33,6 +33,9 @@
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "scene/scene.h"
+#if defined(DUKE_NETPLAY)
+#include "multiplayer_launch.h"
+#endif
 
 namespace {
 
@@ -144,6 +147,49 @@ const int g_registered =
     gba_mod_register_function_entry_plugin(kHookId, kPlaneFn, 1, plane_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kSegmentFn, 1, segment_hook);
 
+// ---- link matches: observe only ---------------------------------------------
+// A link match runs both consoles on every PC and they must stay identical,
+// so nothing above (page clear, skipped planes, CPU discount) may run. Instead
+// a hook that only reads takes a copy of the finished 3D view: 0x0800C734 is a
+// small getter, and its first call from the frame routine 0x08020074 comes
+// right after the scene pass (walls, floors, sprites) and before the weapon
+// and messages are drawn. At present time, every pixel of the shown page that
+// differs from that copy is overlay.
+constexpr char kObserveId[] = "duke.scene_observe";
+constexpr std::uint32_t kObserveFn = 0x0800C734u;
+constexpr std::uint32_t kFrameFnStart = 0x08020074u, kFrameFnEnd = 0x080200F8u;
+
+struct Snapshot {
+    std::vector<std::uint8_t> page[2];
+    bool valid[2] = {false, false};
+    bool have_view = false;
+    float x = 0, y = 0, z = 0;
+    std::uint16_t angle = 0;
+} g_snap;
+gba::GbaBus* g_observe_bus = nullptr;   // the local console of the match
+
+int observe_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    const std::uint32_t lr = cpu->R[14] & ~1u;
+    if (lr < kFrameFnStart || lr >= kFrameFnEnd) return 0;
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || bus != g_observe_bus || !g_settings.native || !in_bitmap_mode(bus)) return 0;
+    const std::uint8_t* iw = bus->iwram_ptr();
+    const int page = page_index(rd32(iw + kDrawPage));
+    if (page < 0 || rd32(iw + kMirrorPass) != 0) return 0;
+    g_snap.page[page].assign(bus->vram_ptr() + (page ? 0xA000 : 0),
+                             bus->vram_ptr() + (page ? 0xA000 : 0) + kPageBytes);
+    g_snap.valid[page] = true;
+    g_snap.x = static_cast<std::int32_t>(rd32(iw + kViewX)) / 256.0f;
+    g_snap.y = static_cast<std::int32_t>(rd32(iw + kViewY)) / 256.0f;
+    g_snap.z = static_cast<std::int32_t>(rd32(iw + kViewZ)) / 256.0f;
+    g_snap.angle = rd16(iw + kViewAngle);
+    g_snap.have_view = true;
+    return 0;   // observed only
+}
+
+const int g_observe_registered =
+    gba_mod_register_function_entry_plugin(kObserveId, kObserveFn, 1, observe_hook);
+
 // ---- compositing ---------------------------------------------------------------
 std::vector<std::uint32_t> g_frame;
 DukeSceneView g_last_view;   // camera of the most recent composite (debugging)
@@ -182,6 +228,28 @@ void draw_bitmap_overlay(const Layout& l, const std::uint8_t* page, const std::u
             while (e < 240 && row[e] == row[x]) ++e;
             fill(l, l.box_x + x * l.scale, y * l.scale, l.box_x + e * l.scale, (y + 1) * l.scale, lut[row[x]]);
             x = e;
+        }
+    }
+}
+
+// Link matches: the overlay is whatever differs from the copy of the 3D view.
+// A weapon pixel that happens to match the wall behind it would read as a
+// hole, so a pixel whose two horizontal or two vertical neighbours are overlay
+// counts as overlay too.
+void draw_diff_overlay(const Layout& l, const std::uint8_t* page, const std::uint8_t* base,
+                       const std::uint8_t* pal) {
+    static std::vector<std::uint8_t> mask;
+    mask.assign(kPageBytes, 0);
+    for (std::size_t i = 0; i < kPageBytes; ++i) mask[i] = page[i] != base[i];
+    auto m = [&](int x, int y) { return x >= 0 && x < 240 && y >= 0 && y < 160 && mask[y * 240 + x]; };
+    std::uint32_t lut[256];
+    for (int i = 0; i < 256; ++i) lut[i] = colour(rd16(pal + i * 2));
+    for (int y = 0; y < 160; ++y) {
+        const std::uint8_t* row = page + y * 240;
+        for (int x = 0; x < 240; ++x) {
+            if (!m(x, y) && !(m(x - 1, y) && m(x + 1, y)) && !(m(x, y - 1) && m(x, y + 1))) continue;
+            fill(l, l.box_x + x * l.scale, y * l.scale, l.box_x + (x + 1) * l.scale, (y + 1) * l.scale,
+                 lut[row[x]]);
         }
     }
 }
@@ -306,21 +374,22 @@ void apply_fade(const Layout& l, std::uint16_t bldcnt, std::uint16_t bldy) {
 
 // Builds the composite into g_frame. False when the game is not showing a
 // native-rendered 3D view right now.
-bool compose(int out_w, int out_h) {
-    gba::GbaBus* bus = gbarecomp::active_bus();
+bool compose(int out_w, int out_h, gba::GbaBus* bus = gbarecomp::active_bus(), bool match = false) {
     if (!g_settings.native || !bus || out_w < 64 || out_h < 48) return false;
     const std::uint16_t dispcnt = bus->io().read16(0x000);
     if ((dispcnt & 7u) != 4u || !(dispcnt & 0x0400)) { g_state.front = -1; return false; }
 
     const int front = (dispcnt >> 4) & 1;
-    if (front != g_state.front) {
+    if (match) {
+        if (!g_snap.valid[front] || !g_snap.have_view) return false;
+    } else if (front != g_state.front) {
         // A page is overlay-only exactly when the hook cleared it since it
         // was last shown; anything else is a full-screen picture of its own.
         g_state.overlay_valid[front] = g_state.cleared[front] != g_state.presented[front];
         g_state.presented[front] = g_state.cleared[front];
         g_state.front = front;
     }
-    if (!g_state.overlay_valid[front] || !g_state.have_view) return false;
+    if (!match && (!g_state.overlay_valid[front] || !g_state.have_view)) return false;
 
     dukescene::Memory mem;
     mem.ewram = bus->ewram_ptr(); mem.iwram = bus->iwram_ptr();
@@ -333,12 +402,14 @@ bool compose(int out_w, int out_h) {
     o.width = out_w; o.height = out_h;
     o.fov_scale = g_settings.fov_percent / 100.0f;
     o.use_view = true;
-    o.view_x = g_state.x; o.view_y = g_state.y; o.view_z = g_state.z;
+    o.view_x = match ? g_snap.x : g_state.x;
+    o.view_y = match ? g_snap.y : g_state.y;
+    o.view_z = match ? g_snap.z : g_state.z;
     // Follow the mouse between game ticks: the player's facing angle is
     // updated every display frame, the game's view angle only when it draws.
-    o.view_angle = g_state.angle;
+    o.view_angle = match ? g_snap.angle : g_state.angle;
     std::uint16_t now = 0;
-    if (g_state.have_entity_angle && entity_angle(bus, &now)) {
+    if (!match && g_state.have_entity_angle && entity_angle(bus, &now)) {
         // Turning the game has applied since it drew, plus mouse movement it
         // has not been given yet (that happens once per game tick). Only ever
         // a fraction of a turn; anything larger is not mouse movement.
@@ -360,7 +431,9 @@ bool compose(int out_w, int out_h) {
     l.w = out_w; l.h = out_h;
     l.scale = out_h / 160.0f;
     l.box_x = static_cast<int>((out_w - 240.0f * l.scale) * 0.5f);
-    draw_bitmap_overlay(l, bus->vram_ptr() + (front ? 0xA000 : 0), bus->pal_ptr());
+    const std::uint8_t* page = bus->vram_ptr() + (front ? 0xA000 : 0);
+    if (match) draw_diff_overlay(l, page, g_snap.page[front].data(), bus->pal_ptr());
+    else draw_bitmap_overlay(l, page, bus->pal_ptr());
     apply_fade(l, bus->io().read16(0x050), bus->io().read16(0x054));
     draw_objects(l, bus, dispcnt);
     return true;
@@ -388,6 +461,28 @@ DukeSceneSettings* duke_scene_settings() { return &g_settings; }
 void duke_scene_install(gbarecomp::RunOptions* opts) {
     opts->present_frame = present_frame;
 }
+
+#if defined(DUKE_NETPLAY)
+void duke_scene_install_match(gbarecomp::GbaNetplayLaunch* launch) {
+    if (g_observe_registered) gba_mod_set_function_hook_enabled(kObserveId, 1);
+    launch->present_frame = [](gbarecomp::GbaNetplayPresentFrame& frame) {
+        if (!frame.local_bus) return false;
+        g_observe_bus = frame.local_bus;
+        // Kept armed here too, in case anything reset the hook table.
+        if (g_observe_registered) gba_mod_set_function_hook_enabled(kObserveId, 1);
+        static const int kPercent[] = {100, 75, 50, 33, 25};
+        const int pct = kPercent[std::clamp(g_settings.resolution, 0, 4)];
+        const int w = std::max(240, frame.drawable_width * pct / 100);
+        const int h = std::max(160, frame.drawable_height * pct / 100);
+        if (!compose(w, h, frame.local_bus, true)) return false;
+        frame.argb = g_frame.data();
+        frame.width = static_cast<unsigned>(w);
+        frame.height = static_cast<unsigned>(h);
+        g_native_presents.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+}
+#endif
 
 void duke_scene_frame_start() {
     // The runtime disables every entry hook when it activates mod plugins, so

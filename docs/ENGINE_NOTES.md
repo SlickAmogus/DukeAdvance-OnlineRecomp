@@ -219,6 +219,16 @@ MULTIPLAYER (object flag bit 4) while that count is below 2.
 - Game flow: MULTIPLAYER on both → the master (DUKE 1) gets SERVER SETUP
   (GAME TYPE, WORLD, SET LIMIT, LAUNCH), the other WAITING FOR SERVER; after
   LAUNCH the other confirms the settings with A, then the master with A.
+- Native renderer in matches (`scene_host.cpp`, `duke_scene_install_match`):
+  observe-only. The frame routine `0x08020074` runs the scene pass
+  (`0x080201CC`), then calls the getter `0x0800C734`; a hook on that getter
+  (only when the return address is inside `0x08020074..0x080200F8`, and only
+  for the local console's bus) copies the drawn page and the camera. The
+  weapon and messages are drawn after it, so at present time any pixel of the
+  shown page that differs from its copy is overlay (holes closed by a
+  neighbour rule). No page clear, plane skip or CPU discount, so matches keep
+  the game's own pace. Verified with `tools/re/link_test.py`: both seats
+  agree on the final checkpoint and `seatN_*_game.ppm` show the native view.
 
 ## Frame pacing
 

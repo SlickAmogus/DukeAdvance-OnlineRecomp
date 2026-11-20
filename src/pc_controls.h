@@ -9,6 +9,10 @@
 // rows into the run options. Call once before gbarecomp::run_game().
 void duke_pc_controls_install(gbarecomp::RunOptions* opts, const char* argv0);
 
+// Link matches: only reads duke_pc.ini (renderer and display settings), and
+// installs nothing that touches the game.
+void duke_pc_controls_load_settings(const char* argv0);
+
 // Guest address of the player's entity once it has been identified for the
 // current stretch of gameplay, otherwise 0.
 std::uint32_t duke_pc_controls_player_entity();

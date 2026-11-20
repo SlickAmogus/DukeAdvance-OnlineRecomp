@@ -96,6 +96,14 @@ note = "pitch recentre guard (negative side)"
 # hook replaces it by clearing the bitmap page, so that everything the game
 # draws afterwards (weapon, messages) can be told apart from the 3D view. With
 # the hook disabled or declining, the original function runs unchanged.
+# 0x0800C734 is a small getter; its first call from the frame routine
+# 0x08020074 comes right after the scene pass, before the weapon is drawn.
+# Link matches take a copy of the finished 3D view there (observed only).
+[[mod_function_hook]]
+addr = 0x0800C734
+mode = "thumb"
+note = "after the scene pass: link-match native renderer snapshot (observed only)"
+
 [[mod_function_hook]]
 addr = 0x08022EF8
 mode = "thumb"

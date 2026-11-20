@@ -118,7 +118,10 @@ its own instance for this game). Your name and the server are in
 During a match only the keyboard bindings of `input.ini` play (arrows, Z
 fires, X jumps, C/V strafe, Enter, Right Shift): mouse aim and the WASD
 layout change the game's memory directly, which would make the two consoles
-drift apart. The match shows the original 240x160 picture.
+drift apart. The native renderer draws matches too (when it is on in
+`duke_pc.ini`), from a hook that only reads the game's memory; unlike single
+player the game keeps its original pace (about 30 frames a second in open
+areas), because speeding it up means changing what the consoles run.
 
 Direct links without a server work too:
 
