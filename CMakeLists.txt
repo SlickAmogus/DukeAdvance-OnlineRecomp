@@ -16,6 +16,11 @@ set(GBARECOMP_RUNTIME_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../recomp-ui"
     CACHE PATH "recomp-ui checkout")
 set(RECOMP_UI_ROOT "${GBARECOMP_RUNTIME_UI_ROOT}" CACHE PATH "")
 
+# Link-cable netplay for the game's own multiplayer (framework recomp-net
+# adapter). Must be set before the framework is added.
+option(DUKE_NETPLAY "Build link-cable netplay for the multiplayer modes" ON)
+set(GBARECOMP_NETPLAY ${DUKE_NETPLAY} CACHE BOOL "" FORCE)
+
 # Framework: runtime, hardware model, debug server. Tools/tests stay unbuilt.
 add_subdirectory("${GBARECOMP_ROOT}" gbarecomp EXCLUDE_FROM_ALL)
 include("${CMAKE_CURRENT_BINARY_DIR}/gbarecomp/runtime.cmake")
@@ -27,7 +32,7 @@ gbarecomp_add_runtime_target(DukeAdvanceRecomp
     DEFAULT_GAME_CONFIG_PATH "game.toml"
 )
 target_sources(DukeAdvanceRecomp PRIVATE src/main.cpp src/debug_watch.cpp src/pc_controls.cpp
-    src/scene_host.cpp src/scene/scene.cpp)
+    src/scene_host.cpp src/scene/scene.cpp src/pc_menu.cpp)
 target_include_directories(DukeAdvanceRecomp PRIVATE
     "${RECOMP_UI_ROOT}/src" ${SDL2_INCLUDE_DIR})
 # Executable icon (assets/icon.ico, made from assets/icon.png). SDL also uses
@@ -38,6 +43,19 @@ if(WIN32)
 endif()
 # The runtime archives reference each other; GNU ld needs them grouped.
 target_link_gbarecomp_runtime_stack(DukeAdvanceRecomp)
+if(DUKE_NETPLAY)
+    target_link_libraries(DukeAdvanceRecomp PRIVATE gbarecomp_netplay)
+    gbarecomp_target_netplay_identity(DukeAdvanceRecomp "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated")
+    target_compile_definitions(DukeAdvanceRecomp PRIVATE DUKE_NETPLAY=1)
+    # Online rooms (a room server's relay carries the match).
+    target_sources(DukeAdvanceRecomp PRIVATE src/online/room_client.cpp
+        src/online/relay_bridge.cpp src/online/online_match.cpp)
+    target_include_directories(DukeAdvanceRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    if(WIN32)
+        target_link_libraries(DukeAdvanceRecomp PRIVATE ws2_32)
+    endif()
+endif()
 
 # Dear ImGui core + SDL2 backend + the menu model. recomp-ui is C++17 while
 # the generated cartridge code is C++20, so it gets its own static library.

@@ -18,3 +18,5 @@ recomp_scan.toml
 duke_pc.ini
 __pycache__/
 *.zip
+server/duke_server.txt
+recomp_coverage_*.json

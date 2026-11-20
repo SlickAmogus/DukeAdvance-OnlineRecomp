@@ -439,6 +439,7 @@ enum { kBitA = 0, kBitB = 1, kBitStart = 3, kBitRight = 4, kBitLeft = 5, kBitUp 
 std::uint32_t g_menu = 0;               // menu the handler last ran for
 std::uint64_t g_menu_frame = 0;         // display frame it last ran in
 std::atomic<int> g_left_clicks{0}, g_right_clicks{0}, g_wheel{0};
+bool (*g_overlay_input)(const gbarecomp::TouchFrameInfo*, std::uint16_t*) = nullptr;
 std::atomic<int> g_test_pointer_x{-1}, g_test_pointer_y{-1};
 std::atomic<bool> g_test_pointer{false};
 
@@ -694,6 +695,11 @@ std::uint16_t input_frame(const gbarecomp::TouchFrameInfo* info) {
                          !g_test_pointer.load(std::memory_order_relaxed);
     g_last_policy_ms.store(now, std::memory_order_relaxed);
     std::uint16_t keys = 0x03FF;
+    // The PC menus drawn over the game (pc_menu.cpp) come first.
+    if (g_overlay_input && g_overlay_input(info, &keys)) {
+        if (host_ready()) { update_capture(); remember_display_mode(); }
+        return keys;
+    }
     menu_mouse(info, &keys, resumed);
     if (!host_ready()) return keys;
     update_capture();
@@ -792,6 +798,44 @@ int ui_set(const char* key, int value) {
 }  // namespace
 
 std::uint32_t duke_pc_controls_player_entity() { return g_trusted ? g_entity : 0u; }
+
+bool duke_pc_controls_menu(std::uint32_t* menu, int* selected) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || !menu_is_live()) return false;
+    *menu = g_menu;
+    *selected = static_cast<std::int32_t>(rd32(bus->iwram_ptr() + kMenuSelected));
+    return true;
+}
+
+bool duke_pc_controls_pointer(const gbarecomp::TouchFrameInfo* info, float* x, float* y) {
+    const Pointer p = read_pointer(info, false);
+    *x = p.x; *y = p.y;
+    return p.present;
+}
+
+void duke_pc_controls_peek_mouse(int* left, int* right, int* wheel) {
+    *left = g_left_clicks.load(std::memory_order_relaxed);
+    *right = g_right_clicks.load(std::memory_order_relaxed);
+    *wheel = g_wheel.load(std::memory_order_relaxed);
+}
+
+void duke_pc_controls_take_mouse(int* left, int* right, int* wheel) {
+    *left = g_left_clicks.exchange(0, std::memory_order_relaxed);
+    *right = g_right_clicks.exchange(0, std::memory_order_relaxed);
+    *wheel = g_wheel.exchange(0, std::memory_order_relaxed);
+}
+
+void duke_pc_controls_set_overlay_input(bool (*fn)(const gbarecomp::TouchFrameInfo*, std::uint16_t*)) {
+    g_overlay_input = fn;
+}
+
+const RecompRuntimeUiItem* duke_pc_controls_items(int* count) {
+    *count = static_cast<int>(sizeof(kItems) / sizeof(kItems[0]));
+    return kItems;
+}
+int duke_pc_controls_get(const char* key, int* value) { return ui_get(key, value); }
+int duke_pc_controls_set(const char* key, int value) { return ui_set(key, value); }
+bool duke_pc_controls_in_gameplay() { return g_in_gameplay.load(std::memory_order_relaxed); }
 
 void duke_pc_controls_pending_aim(double* yaw_units, double* pitch_pixels) {
     *yaw_units = 0.0;

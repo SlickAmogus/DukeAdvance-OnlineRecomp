@@ -4,7 +4,7 @@ A native PC build of **Duke Nukem Advance** (GBA, Europe, `AD9P`) made by
 statically recompiling the cartridge with
 [GBARecomp](https://github.com/mstan/gbarecomp), plus PC additions: a native renderer that draws the 3D view at the window's
 own resolution and shape (16:9, 21:9, ...) at 60 frames a second, an in-game
-options menu, fullscreen modes and mouse aim. Online play is planned.
+options menu, fullscreen modes and mouse aim. Online play is in progress.
 
 No game data is in this repository. You need your own cartridge dump and your
 own GBA BIOS dump.
@@ -87,6 +87,32 @@ contains your ROM and BIOS, so keep it to your own machines; it is gitignored.
 - **WASD layout** (on by default): W/S move, A/D strafe, Space jumps, Left
   Ctrl fires, Q/E switch weapon. The original keys still work: arrows, Z (B,
   fire), X (A, jump), C (L), V (R), Enter (Start), Right Shift (Select).
+- **PC SETTINGS in the game's OPTIONS**: a row under GAMMA (Down from GAMMA,
+  or point at it) opens the PC settings in the game's style: native renderer,
+  render resolution, field of view, mouse aim, sensitivity, invert Y, WASD and
+  the scaling filter. Left/Right or a click on either half changes a value,
+  the wheel too; Back or right click closes. They are the same settings as
+  Esc > Graphics / Controls.
+
+## Multiplayer and online (in progress)
+
+The cartridge has link-cable multiplayer (MULTIPLAYER on the main menu, off
+without a cable). The build includes the framework's link-cable netplay, which
+runs both consoles on each PC and sends only the pad. Two copies linked on one
+PC (`tools/re/link_test.py`) now run in lockstep to the main menu with every
+routine compiled natively (netplay has no interpreter: the four link routines
+the game copies into IWRAM are declared in `recomp.toml`). Not working yet:
+the game's own link handshake never sees the second console, so MULTIPLAYER
+stays off; that is being worked on.
+
+An ONLINE menu (host, find and join rooms by code, your name, chat) is built
+on the GTA Advance recomp's room client and opens from MULTIPLAYER. It stays
+hidden until matches connect; `DUKE_ONLINE_PREVIEW=1` shows it. `server/`
+deploys a separate room server instance for this game (UDP 27893, admin
+27894) beside the Silent Hill and GTA ones: copy
+`server/duke_server.example.txt` to `server/duke_server.txt`, then run
+`server/duke_redeploy.bat`; `duke_console.bat`, `duke_monitor.bat` and
+`duke_log.bat` manage it.
 
 ### Native renderer
 
@@ -112,6 +138,9 @@ original frame rate. Not handled natively yet: mirrors and skies.
 |---|---|
 | `src/main.cpp` | Host entry point |
 | `src/pc_controls.cpp` | Mouse aim, mouse pointing in the game's menus, WASD layout, their menu rows and settings |
+| `src/pc_menu.cpp` | PC SETTINGS and ONLINE menus drawn over the game's own menus (font: `tools/make_menu_font.py`) |
+| `src/online/` | Room server client, relay bridge for netplay, match setup |
+| `server/` | Room server deployment and admin consoles |
 | `src/scene/` | Native renderer (Doom-style software renderer over the game's level data) |
 | `src/scene_host.cpp` | Hooks the renderer into the game and composites weapon and HUD |
 | `src/debug_watch.cpp` | Debug-server helpers (RAM write watch, synthetic mouse, composite screenshot) |

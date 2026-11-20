@@ -1,0 +1,14 @@
+# Duke Nukem Advance room server settings. Copy to duke_server.txt (kept out of git).
+#
+# host: the Linux machine duke_redeploy.bat logs in to, as user@address.
+host=root@your.server.example
+#
+# source: the Silent Hill Online checkout the server program is built from
+# (sh_master.c and its headers); relative to this folder or absolute.
+source=..\..\..\silenthill-online\silent-hill-decomp
+#
+# args: the server's command line, used when the service is first created.
+# Later changes go in ExecStart= of /etc/systemd/system/duke-rooms.service.
+# Its own UDP port (27893) and admin port (27894) keep it apart from a
+# Silent Hill server on the same machine (27888 / 27891).
+args=-p 27893 --admin 27894 -n "Duke Nukem Advance rooms" --no-ghosts --no-memos --no-deaths --no-update-check

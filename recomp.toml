@@ -29,6 +29,54 @@ size          = 0x0000411C
 name          = "iwram_image"
 note          = "crt0 (0x08000130) DMA3-copies .iwram: renderer/mixer ARM code plus initialised data"
 
+# Four small ARM routines the game DMA-copies into low IWRAM when it needs
+# them (link/sound code: each pool holds DMA0 SAD, source, dest, control).
+# Single player only ever interpreted them; netplay has no interpreter.
+[[code_copy]]
+runtime_start = 0x03000344
+source_start  = 0x0802DAC4
+size          = 0x00000058
+name          = "iwram_low_344"
+note          = "DMA0 from the pool at 0x0802CFF0"
+
+[[code_copy]]
+runtime_start = 0x0300039C
+source_start  = 0x0802DB3C
+size          = 0x0000026C
+name          = "iwram_low_39C"
+note          = "DMA0 from the pool at 0x0802DB2C"
+
+[[code_copy]]
+runtime_start = 0x03000608
+source_start  = 0x0802D990
+size          = 0x00000134
+name          = "iwram_low_608"
+note          = "DMA0 from the pool at 0x0802D980"
+
+[[code_copy]]
+runtime_start = 0x0300073C
+source_start  = 0x0802D3F8
+size          = 0x0000017C
+name          = "iwram_low_73C"
+note          = "DMA0 from the pool at 0x0802D3E8"
+
+[[extra_func]]
+addr = 0x03000344
+mode = "arm"
+name = "iwram_low_344"
+[[extra_func]]
+addr = 0x0300039C
+mode = "arm"
+name = "iwram_low_39C"
+[[extra_func]]
+addr = 0x03000608
+mode = "arm"
+name = "iwram_low_608"
+[[extra_func]]
+addr = 0x0300073C
+mode = "arm"
+name = "iwram_low_73C"
+
 # Mouse look (src/pc_controls.cpp). The player update at 0x0801C3E0 pulls the
 # look pitch (IWRAM 0x03002F10) back to zero every tick:
 #   0801C3E4  cmp r1,#0 ; ble -> skip the "pitch > 0" decay
@@ -172,3 +220,397 @@ note = "menu input handler: marks a menu as live for mouse pointing (observed on
 addr = 0x08016794
 mode = "thumb"
 note = "options menu input handler: marks the menu as live for mouse pointing (observed only)"
+
+# Netplay coverage. Link-cable netplay runs without the interpreter, so every
+# entry it reaches needs a native function. These were reached in two-console
+# link tests (tools/re/link_test.py) and checked to be code.
+
+[[extra_func]]
+addr = 0x08010510
+mode = "thumb"
+note = "netplay: reached with no native entry (link test)"
+
+[[extra_func]]
+addr = 0x0802EADA
+mode = "thumb"
+note = "netplay: reached with no native entry (link test)"
+
+[[extra_func]]
+addr = 0x080001E4
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08005EB4
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08008310
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08008544
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0800B4B8
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0800E0F8
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08010480
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08010A44
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08016154
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08017A1C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08017CAC
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801877C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801B8AC
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801EC1C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801ED10
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801ED3C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801ED58
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801ED8C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801EE44
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801EEAC
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801EF0C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801EF64
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801F25C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801F308
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801F358
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801F798
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801F848
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0801FF30
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08020320
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08020678
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08020900
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08020C7C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08020E6C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08020EEC
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080217C0
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080218CC
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08021DB0
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08021F88
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08022100
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080222E0
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08022394
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08022420
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080225C8
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08022A3C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080231E4
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802321C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08023A8C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080254F0
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080262E8
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08026AD0
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08029178
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080291C4
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x080291E4
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802932C
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x08029510
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802B200
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802B218
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802B248
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802B4D8
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802B90E
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802B92A
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802CA38
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802CB04
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802CB80
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802CC70
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802CE20
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802D000
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802E880
+mode = "arm"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802E8AC
+mode = "arm"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802E8D8
+mode = "arm"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802E8E4
+mode = "arm"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802E918
+mode = "arm"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802EAC6
+mode = "thumb"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802EACA
+mode = "thumb"
+note = "netplay: healed in single-player runs, not reached by the finder"
+
+[[extra_func]]
+addr = 0x0802FE16
+mode = "thumb"
+note = "netplay: function found by Ghidra analysis, not reached by the finder"
+
+[[extra_func]]
+addr = 0x03000824
+mode = "arm"
+note = "netplay: reached with no native entry (link test)"
