@@ -33,13 +33,18 @@ Apply the patches to the `gbarecomp` checkout before building:
 cd gbarecomp
 git apply ../DukeAdvanceRecomp/patches/0001-*.patch ../DukeAdvanceRecomp/patches/0002-*.patch ../DukeAdvanceRecomp/patches/0003-*.patch
 git -C external/arm-recomp-core apply ../../../DukeAdvanceRecomp/patches/0004-*.patch
+git apply ../DukeAdvanceRecomp/patches/0005-*.patch
 ```
+
+Or clone the fork that already carries them (shared with the GTA Advance
+recomp): `git clone --recurse-submodules -b pc-ports https://github.com/SlickAmogus/gbarecomp`.
 
 | Patch | Why |
 |---|---|
 | `0001` | 8-bit writes to palette/VRAM/OAM behave as on hardware. Without it floors and ceilings render with every other pixel column stale. |
 | `0002` | Lets the game hand the window a full-size frame of its own, and discount emulated CPU time around guest work it replaces (the native renderer needs both). Also keeps the menu's UI library away from the mouse while the game has it captured; without that, holding fire while aiming drops mouse aim. |
 | `0003`, `0004` | Recompiler: cover the game's self-modifying wall rasterisers statically (branch/no-op slots, rewritten AND and CMP operands). Without them that code runs in the interpreter and the game is several times slower. Rebuild `gba_recompile` after applying. |
+| `0005` | Exclusive fullscreen keeps the desktop's resolution (it used to switch the monitor to a tiny mode), and switching between borderless and exclusive no longer leaves the picture in a corner. |
 
 ## Build (Windows)
 
@@ -66,8 +71,10 @@ contains your ROM and BIOS, so keep it to your own machines; it is gitignored.
 
 - **Esc** opens the options menu: display mode (windowed, borderless,
   exclusive fullscreen), window scale, integer scaling, filters, scanlines,
-  volume, save states, and the Controls section below. The fullscreen mode is
-  remembered between launches.
+  volume, save states, and the Controls section below. The game starts in
+  borderless fullscreen; the mode is remembered between launches and
+  Alt+Enter toggles it. The shell's turbo hotkey is unbound and its
+  performance overlay is on F3 (`config.ini`, `[KeyMap]`).
 - **Mouse aim** (on by default): the mouse turns and looks up/down, left click
   fires, right click jumps. Sensitivity and invert-Y are under Controls. The
   cursor is released while the menu is open. Vertical look drives the game's
