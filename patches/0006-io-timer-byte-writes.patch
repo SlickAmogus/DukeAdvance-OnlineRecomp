@@ -1,0 +1,49 @@
+﻿From 4d0235a10ff65f7141624faea817ef215900cf25 Mon Sep 17 00:00:00 2001
+From: Chris Hardin <kushastronaut@icloud.com>
+Date: Fri, 20 Nov 2026 00:09:35 -0500
+Subject: [PATCH] GbaIo: byte writes to the timer registers act like the 16-bit
+ write
+
+An STRB to TMxCNT_H (or a reload half) only stored the byte; the timer's
+control and reload stayed as they were, so a timer started that way never
+ran. Duke Nukem Advance's link library starts and stops its transfer timer
+(timer 1) like that, and its link handshake never completed. The byte is now
+merged into the register and committed as the 16-bit write it completes.
+
+The netplay test dump also writes the IO registers 0x100..0x20F after each
+machine's RAM.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XhB6DUH6UsxVFSPFS3MfuH
+---
+ src/gba/gba_io.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/gba/gba_io.cpp b/src/gba/gba_io.cpp
+index 5c0de50..4c104b7 100644
+--- a/src/gba/gba_io.cpp
++++ b/src/gba/gba_io.cpp
+@@ -725,6 +725,20 @@ void GbaIo::write8(uint32_t off, uint8_t v) {
+     }
+     if (off >= kIoSize) { warn_unhandled(off, v, true, 1); return; }
+     mmio_cap_record(0x04000000u + off, v, 1);
++    // Timers: a byte write changes half of the reload or control register
++    // and has the same effect as the 16-bit write it completes (starting a
++    // timer loads its counter). Link libraries start and stop their timer
++    // with STRB/ORR on TMxCNT_H; stored as a plain byte, the timer never ran.
++    if (off >= 0x100u && off < 0x110u) {
++        const uint32_t base = off & ~1u;
++        const int timer = static_cast<int>((base - 0x100u) / 4u);
++        const bool control = ((base - 0x100u) % 4u) == 2u;
++        const unsigned shift = (off & 1u) * 8u;
++        uint16_t merged = control ? timer_control_[timer] : timer_reload_[timer];
++        merged = static_cast<uint16_t>((merged & ~(0xFFu << shift)) | (static_cast<unsigned>(v) << shift));
++        write16_commit(base, merged, /*record=*/false);
++        return;
++    }
+     // Audio registers (0x060..0x0AF) go to the audio subsystem on
+     // top of the backing-array store, so the channel state machines
+     // see triggers / envelope reloads / length resets.
+-- 
+2.51.0.windows.1
+

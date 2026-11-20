@@ -614,3 +614,25 @@ note = "netplay: function found by Ghidra analysis, not reached by the finder"
 addr = 0x03000824
 mode = "arm"
 note = "netplay: reached with no native entry (link test)"
+
+[[extra_func]]
+addr = 0x030037D4
+mode = "arm"
+note = "netplay: IWRAM image routine entered through a computed pointer (interpreted in single player)"
+[[extra_func]]
+addr = 0x030039CC
+mode = "arm"
+note = "netplay: IWRAM image routine entered through a computed pointer (interpreted in single player)"
+[[extra_func]]
+addr = 0x03003B64
+mode = "arm"
+note = "netplay: IWRAM image routine entered through a computed pointer (interpreted in single player)"
+[[extra_func]]
+addr = 0x03003AC8
+mode = "arm"
+note = "netplay: reached with no native entry (link test)"
+
+[[extra_func]]
+addr = 0x03003CA8
+mode = "arm"
+note = "netplay: reached with no native entry (link test)"

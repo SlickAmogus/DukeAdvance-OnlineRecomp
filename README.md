@@ -33,7 +33,7 @@ Apply the patches to the `gbarecomp` checkout before building:
 cd gbarecomp
 git apply ../DukeAdvanceRecomp/patches/0001-*.patch ../DukeAdvanceRecomp/patches/0002-*.patch ../DukeAdvanceRecomp/patches/0003-*.patch
 git -C external/arm-recomp-core apply ../../../DukeAdvanceRecomp/patches/0004-*.patch
-git apply ../DukeAdvanceRecomp/patches/0005-*.patch
+git apply ../DukeAdvanceRecomp/patches/0005-*.patch ../DukeAdvanceRecomp/patches/0006-*.patch
 ```
 
 Or clone the fork that already carries them (shared with the GTA Advance
@@ -45,6 +45,7 @@ recomp): `git clone --recurse-submodules -b pc-ports https://github.com/SlickAmo
 | `0002` | Lets the game hand the window a full-size frame of its own, and discount emulated CPU time around guest work it replaces (the native renderer needs both). Also keeps the menu's UI library away from the mouse while the game has it captured; without that, holding fire while aiming drops mouse aim. |
 | `0003`, `0004` | Recompiler: cover the game's self-modifying wall rasterisers statically (branch/no-op slots, rewritten AND and CMP operands). Without them that code runs in the interpreter and the game is several times slower. Rebuild `gba_recompile` after applying. |
 | `0005` | Exclusive fullscreen keeps the desktop's resolution (it used to switch the monitor to a tiny mode), and switching between borderless and exclusive no longer leaves the picture in a corner. |
+| `0006` | Byte writes to the timer registers start and stop timers as on hardware. The game's link code starts its transfer timer that way; without it MULTIPLAYER never sees the other console. |
 
 ## Build (Windows)
 
@@ -94,26 +95,51 @@ contains your ROM and BIOS, so keep it to your own machines; it is gitignored.
   the wheel too; Back or right click closes. They are the same settings as
   Esc > Graphics / Controls.
 
-## Multiplayer and online (in progress)
+## Multiplayer and online
 
-The cartridge has link-cable multiplayer (MULTIPLAYER on the main menu, off
-without a cable). The build includes the framework's link-cable netplay, which
-runs both consoles on each PC and sends only the pad. Two copies linked on one
-PC (`tools/re/link_test.py`) now run in lockstep to the main menu with every
-routine compiled natively (netplay has no interpreter: the four link routines
-the game copies into IWRAM are declared in `recomp.toml`). Not working yet:
-the game's own link handshake never sees the second console, so MULTIPLAYER
-stays off; that is being worked on.
+The cartridge's own link-cable multiplayer (MULTIPLAYER on the main menu) is
+played over the network. The framework's link-cable netplay runs both
+consoles on each PC and sends only the pad, so the game itself decides
+everything, exactly as on two linked GBAs.
 
-An ONLINE menu (host, find and join rooms by code, your name, chat) is built
-on the GTA Advance recomp's room client and opens from MULTIPLAYER. It stays
-hidden until matches connect; `DUKE_ONLINE_PREVIEW=1` shows it. `server/`
-deploys a separate room server instance for this game (UDP 27893, admin
-27894) beside the Silent Hill and GTA ones: copy
-`server/duke_server.example.txt` to `server/duke_server.txt`, then run
-`server/duke_redeploy.bat`; `duke_console.bat`, `duke_monitor.bat` and
-`duke_log.bat` manage it.
+**ONLINE**: on the main menu, Down from OPTIONS (or point at MULTIPLAYER)
+selects MULTIPLAYER, which opens the online menu: host a game, find games,
+join by a room code, set your name, chat. When both players are in the room
+the host picks START; both games restart straight into the link session
+(a link game has to begin from a fresh boot on both consoles) and are stepped
+to the game's own multiplayer screens. There the host (DUKE 1) chooses GAME
+TYPE, WORLD and SET LIMIT and LAUNCH; the other player confirms with A, then
+the host with A.
 
+Rooms live on a room server (an `sh_master` from Silent Hill Online, run as
+its own instance for this game). Your name and the server are in
+`duke_online.ini` next to the game (`name=`, `server=host:port`).
+
+During a match only the keyboard bindings of `input.ini` play (arrows, Z
+fires, X jumps, C/V strafe, Enter, Right Shift): mouse aim and the WASD
+layout change the game's memory directly, which would make the two consoles
+drift apart. The match shows the original 240x160 picture.
+
+Direct links without a server work too:
+
+```
+DukeAdvanceRecomp --netplay-bind 0.0.0.0:5300 --netplay-peer FRIEND_IP:5301 --netplay-seat 0 --netplay-session 4242
+DukeAdvanceRecomp --netplay-bind 0.0.0.0:5301 --netplay-peer YOUR_IP:5300 --netplay-seat 1 --netplay-session 4242
+```
+
+Tests: `tools/re/link_test.py` (two linked copies on one PC, scripted pads),
+`tools/re/online_test.py SERVER` (the same through a room server),
+`tools/re/online_menu_test.py SERVER` (the ONLINE menu: host, join by code,
+start).
+
+### Running the room server
+
+`server/duke_redeploy.bat` installs or updates it on a Linux machine over ssh
+(copy `server/duke_server.example.txt` to `server/duke_server.txt` and set
+`host=`). It runs as the `duke-rooms` service on UDP 27893 (admin console on
+27894), apart from the Silent Hill and GTA Advance servers on the same
+machine. `duke_console.bat`, `duke_monitor.bat` and `duke_log.bat` open its
+admin console, its live log and the whole log.
 ### Native renderer
 
 On by default (Esc > Graphics > Native renderer). The game's level data is

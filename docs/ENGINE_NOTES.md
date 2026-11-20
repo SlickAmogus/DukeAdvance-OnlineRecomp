@@ -200,6 +200,26 @@ Mouse pointing (`src/pc_controls.cpp`) observes the two handlers to know a
 menu is live, reads the item boxes from the sprite list, and only ever
 presses pad buttons.
 
+## Link multiplayer
+
+The link library (ROM `0x08017C00`..`0x08018780`) runs the cable in 16-bit
+multiplay mode at 115200 baud. Its state is IWRAM `0x03000210`: `+0xC` low
+nibble = the consoles seen connected (a bit each), bits 5-6 = this console's
+ID (from SIOCNT); the player count is `table[0x08035DDC + mask]`
+(`0x080187C0`). The main menu's per-frame handler (`0x08014B9C`) hides
+MULTIPLAYER (object flag bit 4) while that count is below 2.
+
+- The master paces transfers with timer 1 (reload `0xCFE0`, IRQ → callback
+  `0x080186F4`, which starts the next transfer); a slave uses the serial IRQ
+  and timer 1 as a timeout (`0x08018750`). Both start and stop timer 1 with
+  byte writes to TM1CNT_H, which the framework only honours with patch 0006.
+- Four small ARM routines are DMA-copied into IWRAM `0x03000344..0x030008B8`
+  when needed (pools at `0x0802CFF0`, `0x0802D3E8`, `0x0802D980`,
+  `0x0802DB2C`); `recomp.toml` declares them as code copies.
+- Game flow: MULTIPLAYER on both → the master (DUKE 1) gets SERVER SETUP
+  (GAME TYPE, WORLD, SET LIMIT, LAUNCH), the other WAITING FOR SERVER; after
+  LAUNCH the other confirms the settings with A, then the master with A.
+
 ## Frame pacing
 
 Before drawing the first wall of a frame the game waits in a loop

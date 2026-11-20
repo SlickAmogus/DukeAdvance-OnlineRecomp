@@ -278,10 +278,10 @@ std::string opening_script(bool host) {
     press(kStart, 200);                                 // title
     for (int i = 0; i < 3; ++i) press(kDown, 40);       // MULTIPLAYER
     press(kA, 200);
-    if (host) {
-        for (int i = 0; i < g_on.mode; ++i) press(kDown, 40);
-        press(kA, 200);
-    }
+    // The host's console is now on SERVER SETUP (game type, world, limit,
+    // launch) and the other on WAITING FOR SERVER: the players take over in
+    // the game's own menus.
+    (void)host;
     return out;
 }
 
@@ -298,12 +298,42 @@ void restart_into_match() {
     if (!g_save_path.empty()) cmd += " --save-path \"" + g_save_path + "\"";
 #if defined(_WIN32)
     SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str());
-    STARTUPINFOA si{}; si.cb = sizeof(si);
+    // The new game writes to the same log as this one (when there is one).
+    // Only those two handles are inherited: no sockets, no files.
+    STARTUPINFOEXA si{}; si.StartupInfo.cb = sizeof(si);
+    std::vector<HANDLE> inherit;
+    for (DWORD which : {STD_OUTPUT_HANDLE, STD_ERROR_HANDLE}) {
+        const HANDLE h = GetStdHandle(which);
+        if (h && h != INVALID_HANDLE_VALUE && std::find(inherit.begin(), inherit.end(), h) == inherit.end() &&
+            SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
+            inherit.push_back(h);
+    }
+    std::vector<char> attrs;
+    DWORD flags = 0;
+    if (!inherit.empty()) {
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+        attrs.resize(size);
+        si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrs.data());
+        if (InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &size) &&
+            UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
+                                      inherit.size() * sizeof(HANDLE), nullptr, nullptr)) {
+            flags = EXTENDED_STARTUPINFO_PRESENT;
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        } else {
+            si.lpAttributeList = nullptr;
+        }
+    }
     PROCESS_INFORMATION pi{};
     std::vector<char> line(cmd.begin(), cmd.end()); line.push_back('\0');
     const std::string dir = std::filesystem::path(g_exe).parent_path().string();
     std::fflush(stdout); std::fflush(stderr);
-    if (!CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi)) {
+    const BOOL started = CreateProcessA(nullptr, line.data(), nullptr, nullptr, flags ? TRUE : FALSE, flags,
+                                        nullptr, dir.c_str(), &si.StartupInfo, &pi);
+    if (si.lpAttributeList) DeleteProcThreadAttributeList(si.lpAttributeList);
+    if (!started) {
         show_message("could not restart the game", Screen::Room);
         return;
     }
@@ -426,7 +456,6 @@ std::vector<Row> rows() {
         break;
     case Screen::Room: {
         const bool host = g_on.client && g_on.client->is_host();
-        r.push_back({kModeRow, 0, std::string("GAME: ") + kModes[g_on.mode], host, true});
         if (host) r.push_back({kStartRow, 0, "START", g_on.client->members().size() >= 2});
         r.push_back({kSay, 0, "CHAT"});
         r.push_back({kLeave, 0, "LEAVE ROOM"});
@@ -740,7 +769,8 @@ void draw_full(HostOverlay* ov) {
         for (const auto& m : g_on.client->members()) who += (who.empty() ? "" : ", ") + upper(m.name);
         draw_centered(pen, y, "PLAYERS: " + who, Ink::White); y += lh;
         if (g_on.client->members().size() < 2) { draw_centered(pen, y, "WAITING FOR A SECOND PLAYER", Ink::Dim); y += lh; }
-        else if (!g_on.client->is_host()) { draw_centered(pen, y, "THE HOST PICKS THE GAME", Ink::Dim); y += lh; }
+        else if (!g_on.client->is_host()) { draw_centered(pen, y, "WAITING FOR THE HOST TO START", Ink::Dim); y += lh; }
+        else { draw_centered(pen, y, "START: BOTH GAMES GO TO THE MULTIPLAYER SETUP", Ink::Dim); y += lh; }
         y += 4;
     }
     switch (g_ui.screen) {
@@ -906,7 +936,7 @@ bool overlay_input(const gbarecomp::TouchFrameInfo* info, std::uint16_t* keys) {
         if (g_ui.settling) {
             int l, r, w; duke_pc_controls_take_mouse(&l, &r, &w);
             if (!SDL_WasInit(SDL_INIT_VIDEO) || all_released(bus)) g_ui.settling = false;
-            read_keys(pad);
+            if (g_ui.test_key.empty() && g_ui.test_text.empty()) read_keys(pad);   // brings key states up to date
             return true;
         }
         handle_input(pad);
@@ -1060,9 +1090,7 @@ void duke_menu_install(gbarecomp::RunOptions* opts, int argc, char** argv, const
     opts->host_overlay = host_overlay;
     duke_pc_controls_set_overlay_input(overlay_input);
 #if defined(DUKE_NETPLAY)
-    // ONLINE on the main menu stays hidden until link matches connect; set
-    // DUKE_ONLINE_PREVIEW=1 to try the room lobby.
-    g_netplay_build = std::getenv("DUKE_ONLINE_PREVIEW") != nullptr;
+    g_netplay_build = true;
     g_build = build_tag;
     std::error_code ec;
     const auto exe = std::filesystem::absolute(std::filesystem::path(argc > 0 ? argv[0] : "."), ec);
@@ -1109,7 +1137,12 @@ int duke_menu_tcp_command(const char* request, void (*write)(void*, const char*,
     const auto r = rows();
     std::string reply = "{\"ok\":true,\"screen\":" + std::to_string(static_cast<int>(g_ui.screen)) +
         ",\"cursor\":" + std::to_string(g_ui.cursor) + ",\"focus\":" + std::to_string(static_cast<int>(g_ui.focus)) +
-        ",\"entry\":" + std::to_string(static_cast<int>(g_ui.entry)) + ",\"rows\":[";
+        ",\"entry\":" + std::to_string(static_cast<int>(g_ui.entry)) +
+#if defined(DUKE_NETPLAY)
+        ",\"room\":" + std::to_string(g_on.client ? g_on.client->room() : 0) +
+        ",\"members\":" + std::to_string(g_on.client ? g_on.client->members().size() : 0) +
+#endif
+        ",\"rows\":[";
     for (std::size_t i = 0; i < r.size(); ++i) reply += (i ? ",\"" : "\"") + r[i].text + "\"";
     reply += "]}";
     write(ctx, reply.data(), reply.size());

@@ -25,7 +25,7 @@ class Game:
     def __init__(self, port=19850, extra=(), env=None):
         e = dict(os.environ, GBARECOMP_DIAGNOSTICS="0")
         e.update(env or {})
-        self.log = open(ROOT / "build" / "drive.log", "w")
+        self.log = open(ROOT / "build" / ("drive.log" if port == 19850 else f"drive_{port}.log"), "w")
         self.p = subprocess.Popen(
             [str(EXE), "--no-window", "--volume", "0", "--uncapped",
              "--tcp", str(port), *extra],
