@@ -223,8 +223,8 @@ MULTIPLAYER (object flag bit 4) while that count is below 2.
   the single-player hooks (page clear at `0x08022EF8`, plane skip) run on
   every console of every PC alike (they decide from guest memory only); the
   camera and the overlay bookkeeping follow the local console's bus only.
-  The CPU discount applies only when the room's host chose FRAME RATE: 60
-  (see "Match cost" below).
+  The native wall routine and the CPU discount apply in matches as in single
+  player (see "Match cost" below).
 - SERVER SETUP (master only): GAME TYPE = DEATH MATCH only; WORLD starts on
   AREA 51, then EGYPT 1, EGYPT 2, SYDNEY 1, SYDNEY 2, ALIEN 1, ALIEN 2 (RIGHT
   steps, wraps); SET LIMIT starts on FIRST TO 10, then 20, 30, UNLIMITED,
@@ -247,15 +247,54 @@ which costs about 15% over one), per tick of both consoles; a tick has 16.7 ms:
 | 63-cycle slices (about 25000 slice switches a tick) | about 20 |
 | 2048-cycle link lookahead, cheaper checks (patch 0007) | about 17 |
 | plus wall pixels skipped, HALT in the flip wait, patch 0008 | about 13 (max about 17) |
-| the same with the scene pass discounted (FRAME RATE: 60) | about 18-20 |
+| the same at 60 game frames a second (scene pass discounted) | about 18-20 |
+| native wall routine, 60 game frames a second | about 12-13 |
 
-At the game's own pace it now reaches about 50 frames a second in open areas
-(30 originally). What remains is mostly the game's own scene pass (BSP walk,
-seg clipping and projection, the wall column loops `0x03006300` and
-`0x03006C10` without their pixel calls) times two consoles, and the session's
-per-instruction and per-slice bookkeeping (about 6500 scheduler passes a
-tick, bounded by device events). Profiles: gdb sampling of the running exe
-(`thread apply all bt`); generated functions are named `gf_tfunc_<addr>`.
+What remains is spread out: the session's per-instruction and per-slice
+bookkeeping, RAM-code template checks, rollback snapshots, the BSP walk and
+sprite pass. Profiles: gdb sampling of the running exe (`thread apply all
+bt`); generated functions are named `gf_tfunc_<addr>`, IWRAM templates
+`ram_aot_<n>` (their ROM source is in the comment above each in `generated/`).
+
+### Native wall routine
+
+`src/scene_hle.cpp` replaces `0x080210A0` (one wall) for every wall but the
+frame's first (which waits for the page flip), outside mirror passes. Only the
+wall's effect on the rest of the pass matters for gameplay: the BSP walk
+(`0x08002B78`) skips a child whose box covers no open column (`0x03004640`,
+which also keeps a per-node "seen recently" cache in EWRAM), and the sprite
+pass (`0x08022B4C`) raises event 9 for each sprite of a visited subsector in
+front of the viewer (handler `0x080070E0`: resets entity `+0x30`, wakes
+monsters), until the drawing list it shares with see-through wall columns
+(count IWRAM `0x03002F00`, limit `0x77F` words) is full. The routine's
+pieces, all ported instruction for instruction:
+
+| Address | Role |
+|---|---|
+| `0x030041D4` | view space (cached in the vertex records: `+4` x, `+8` depth, `+0xC` column, `+0x10` frame stamp), near clip at depth `0x200`, side planes, columns, narrowed by `0x03004018` against the closed-column bytes |
+| `0x08020BAC` | clip to the view's side planes |
+| `0x080211F8` | sectors, wall parts (upper/lower/middle, see-through), sets the line's `0x400` |
+| `0x03004BA0` | per-column edge starts and steps; "already hidden" test; sky flag view+0x118 |
+| `0x08002D20` | perspective pieces of a textured wall (at most 20) |
+| `0x03006300`, `0x03006C10` | column loops: clip array `0x03002730` (top << 8 \| bottom), closed bytes `0x03002690` and count `0x0300266C`, plane rows `0x03002D60` |
+| `0x030031EC`, `0x030032B8` | divide and reciprocal: ROM table `0x08000770` and a cache at IWRAM `0x03003338` that their results depend on (power-of-two divisors) |
+
+The column loops are specialised per wall by self-modifying slots; each slot
+is the original branch or a no-op, chosen by one view flag (`0x030060C4`):
+`0x030065A0` view+4 == 0, `0x0300668C` view+0x24, `0x030066BC` !view+0x1C,
+`0x030066F4` view+0x28, `0x0300675C` view+0x74 == -1, `0x03006768` !view+5,
+`0x030068EC` !view+0x20, `0x030066E8` / `0x030069E8` / `0x0300654C` /
+`0x03006954` view+0x118. Not produced natively: pixels, visplanes, sprite clip
+records, see-through column records (only the skipped drawers read them).
+`DUKE_HLE=shadow` runs the native routine on a copy of RAM before each wall
+and compares after it (at the next wall, box test or plane stage): 0
+differences over 18000 level-1 walls and 288000 deathmatch walls; breaking the
+cache or the closed columns on purpose shows at once. (Compare without
+rollback, `LINK_TEST_ARGS=--netplay-delay-sync`: a rollback reloads RAM under
+a pending comparison.)
+
+`DUKE_SCENE_PROBE=<file>` records every guest store during the scene pass by
+writing instruction (how the pass's lasting effects were found).
 
 ## Frame pacing
 

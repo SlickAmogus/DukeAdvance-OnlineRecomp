@@ -109,9 +109,9 @@ everything, exactly as on two linked GBAs.
 **ONLINE**: on the main menu, Down from OPTIONS (or point at MULTIPLAYER)
 selects MULTIPLAYER, which opens the online menu: host a game, find games,
 join by a room code, set your name, chat. When both players are in the room
-the host picks the WORLD (AREA 51, EGYPT 1-2, SYDNEY 1-2, ALIEN 1-2), the
-LIMIT (first to 10/20/30 frags, unlimited, 5/10/20 minutes) and the FRAME
-RATE (GAME or 60), which the other player sees, then START. Both games restart and boot straight into the
+the host picks the WORLD (AREA 51, EGYPT 1-2, SYDNEY 1-2, ALIEN 1-2) and the
+LIMIT (first to 10/20/30 frags, unlimited, 5/10/20 minutes), which the other
+player sees, then START. Both games restart and boot straight into the
 deathmatch: every PC first runs the agreed menu walk on its own at full speed
 (about 15 s, a progress screen meanwhile; the framework's agreed opening),
 then the two connect and play from the first frame of the level.
@@ -123,14 +123,12 @@ its own instance for this game). Your name and the server are in
 During a match only the keyboard bindings of `input.ini` play (arrows, Z
 fires, X jumps, C/V strafe, Enter, Right Shift): mouse aim and the WASD
 layout change the game's memory directly, which would make the two consoles
-drift apart. The native renderer always draws matches. The game's wall, floor and sprite
-pixel work is skipped on every console of both PCs alike (the consoles stay
-identical), and its wait for the next frame halts instead of spinning. With
-FRAME RATE: GAME the game keeps its own pace, about 50 frames a second in open
-areas (30 on the GBA), at about 13 ms of a 16.7 ms frame on the test PC.
-FRAME RATE: 60 runs it at 60 like single player, which costs about 18 ms
-there: each PC runs both consoles, so pick it only when both PCs are fast.
-Both games must use the same choice; the room sees to that. `crash.log` (and `crash.dmp`) appear next to the game if
+drift apart. The native renderer always draws matches, at 60 game frames a second like
+single player. Each PC runs both consoles; what makes that affordable is the
+same on every console of both PCs (so they stay identical): the game's wall
+geometry is computed natively (below), its pixel work is skipped and its wait
+for the next frame halts instead of spinning. A match then takes about 12 ms
+of a 16.7 ms frame on the test PC. `crash.log` (and `crash.dmp`) appear next to the game if
 it ever crashes; a match that stops on missing game code says so in its log.
 
 Direct links without a server work too:
@@ -165,8 +163,15 @@ read straight from its memory and the 3D view is drawn on the PC:
 - **Render resolution** trades sharpness for speed or a chunkier look, and
   **Field of view** zooms out further.
 
-The game still runs its own renderer underneath, because gameplay depends on
-it (enemies notice you when they are drawn); its picture is simply not shown.
+The game still runs its own scene pass underneath, because gameplay depends
+on it: every sprite in a part of the level the pass visits counts as seen
+(that is how enemies notice you), and which parts it visits depends on what
+the walls drawn so far hide. The BSP walk and sprite pass stay the game's
+code; each wall's effect on what is hidden is computed natively
+(`src/scene_hle.cpp`), bit for bit what the game's routine computes, without
+its pixels. Single player costs about 2 ms a frame (the game's own walls took
+about 5). `DUKE_HLE=0` uses the game's wall routine instead, `DUKE_HLE=shadow`
+runs both and reports any difference.
 The weapon and messages are taken from the game's frame and the HUD from its
 sprites. Turning the option off shows the untouched 240x160 picture at the
 original frame rate. Not handled natively yet: mirrors and skies.
@@ -182,6 +187,7 @@ original frame rate. Not handled natively yet: mirrors and skies.
 | `server/` | Room server deployment and admin consoles |
 | `src/scene/` | Native renderer (Doom-style software renderer over the game's level data) |
 | `src/scene_host.cpp` | Hooks the renderer into the game and composites weapon and HUD |
+| `src/scene_hle.cpp` | Native replacement of the game's per-wall routine (occlusion, counters, caches) |
 | `src/debug_watch.cpp` | Debug-server helpers (RAM write watch, synthetic mouse, composite screenshot) |
 | `docs/ENGINE_NOTES.md` | What is known about the game's engine and data formats |
 | `tools/re/` | Reverse-engineering and comparison tools |

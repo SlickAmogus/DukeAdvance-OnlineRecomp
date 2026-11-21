@@ -124,6 +124,32 @@ addr = 0x0300342C
 mode = "arm"
 note = "wall column drawer (same column again): skipped under the native renderer"
 
+# 0x080201CC is the scene pass (set-up, BSP walk, planes, sprites). Observed
+# only, by the diagnostic write probe (DUKE_SCENE_PROBE, scene_host.cpp).
+[[mod_function_hook]]
+addr = 0x080201CC
+mode = "thumb"
+note = "scene pass entry (observed only: diagnostic write probe)"
+
+# 0x080210A0 draws one wall: under the native renderer src/scene_hle.cpp
+# computes what it leaves for the rest of the scene pass (clip array, closed
+# columns, counters, caches) instead. 0x03004640 (BSP box test) and 0x0801F92C
+# (plane stage) are observed only: check points for DUKE_HLE=shadow.
+[[mod_function_hook]]
+addr = 0x080210A0
+mode = "thumb"
+note = "per-wall routine: native replacement under the native renderer"
+
+[[mod_function_hook]]
+addr = 0x03004640
+mode = "arm"
+note = "BSP box test (observed only: native wall check point)"
+
+[[mod_function_hook]]
+addr = 0x0801F92C
+mode = "thumb"
+note = "plane stage (observed only: native wall check point)"
+
 # 0x08021146 is the loop that polls the page-flip flag (IWRAM 0x03001194,
 # cleared by the VBlank handler) before a frame's first wall. The hook enters
 # HALT instead of letting the CPU spin; the loop itself still runs after the

@@ -217,10 +217,6 @@ const char* const kLimits[] = {"FIRST TO 10", "FIRST TO 20", "FIRST TO 30", "UNL
 constexpr int kWorldCount = 7, kLimitCount = 7;
 int mode_world(int mode) { return (mode & 15) % kWorldCount; }
 int mode_limit(int mode) { return ((mode >> 4) & 7) % kLimitCount; }
-// Bit 7: the game runs 60 frames a second (the scene pass discounted on every
-// console), as in single player. Off, it keeps its own pace (about 50 in open
-// areas); 60 needs a faster PC, since each PC runs both consoles.
-bool mode_fps60(int mode) { return (mode & 0x80) != 0; }
 
 enum ControlKind : std::uint8_t { kStartNote = 1, kStartAck = 2, kChatNote = 3, kSettingsNote = 4 };
 
@@ -323,7 +319,6 @@ void restart_into_match() {
 #if defined(_WIN32)
     SetEnvironmentVariableA("GBARECOMP_NETPLAY_OPENING", script.string().c_str());
     SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", nullptr);
-    SetEnvironmentVariableA("DUKE_MATCH_FPS60", mode_fps60(g_on.mode) ? "1" : nullptr);
     // The new game writes to the same log as this one (when there is one).
     // Only those two handles are inherited: no sockets, no files.
     STARTUPINFOEXA si{}; si.StartupInfo.cb = sizeof(si);
@@ -367,7 +362,6 @@ void restart_into_match() {
 #else
     setenv("GBARECOMP_NETPLAY_OPENING", script.string().c_str(), 1);
     unsetenv("GBARECOMP_NETPLAY_SCRIPT");
-    if (mode_fps60(g_on.mode)) setenv("DUKE_MATCH_FPS60", "1", 1); else unsetenv("DUKE_MATCH_FPS60");
     if (std::system((cmd + " &").c_str()) != 0) { show_message("could not restart the game", Screen::Room); return; }
 #endif
     // Keep the room seat for the new process: no goodbye to the server.
@@ -433,7 +427,7 @@ void pump_network() {
 // ── rows of the full menus ──────────────────────────────────────────────────
 enum Item { kSettingRow, kBack,
 #if defined(DUKE_NETPLAY)
-    kHost, kFind, kCode, kName, kSay, kWorldRow, kLimitRow, kFpsRow, kStartRow, kLeave, kRoomRow,
+    kHost, kFind, kCode, kName, kSay, kWorldRow, kLimitRow, kStartRow, kLeave, kRoomRow,
 #endif
 };
 struct Row { Item item; int index; std::string text; bool enabled = true; bool value = false; };
@@ -486,7 +480,6 @@ std::vector<Row> rows() {
         const bool host = g_on.client && g_on.client->is_host();
         r.push_back({kWorldRow, 0, std::string("WORLD: ") + kWorlds[mode_world(g_on.mode)], host, host});
         r.push_back({kLimitRow, 0, std::string("LIMIT: ") + kLimits[mode_limit(g_on.mode)], host, host});
-        r.push_back({kFpsRow, 0, mode_fps60(g_on.mode) ? "FRAME RATE: 60" : "FRAME RATE: GAME", host, host});
         if (host) r.push_back({kStartRow, 0, "START", g_on.client->members().size() >= 2});
         r.push_back({kSay, 0, "CHAT"});
         r.push_back({kLeave, 0, "LEAVE ROOM"});
@@ -526,14 +519,11 @@ void change(const Row& row, int dir) {
         duke_pc_controls_set(it.key, v);
     }
 #if defined(DUKE_NETPLAY)
-    if ((row.item == kWorldRow || row.item == kLimitRow || row.item == kFpsRow) && g_on.client &&
-        g_on.client->is_host()) {
+    if ((row.item == kWorldRow || row.item == kLimitRow) && g_on.client && g_on.client->is_host()) {
         int w = mode_world(g_on.mode), l = mode_limit(g_on.mode);
-        bool fps60 = mode_fps60(g_on.mode);
         if (row.item == kWorldRow) w = (w + dir + kWorldCount) % kWorldCount;
-        else if (row.item == kLimitRow) l = (l + dir + kLimitCount) % kLimitCount;
-        else fps60 = !fps60;
-        g_on.mode = w | l << 4 | (fps60 ? 0x80 : 0);
+        else l = (l + dir + kLimitCount) % kLimitCount;
+        g_on.mode = w | l << 4;
         send_settings();
     }
 #endif
@@ -545,7 +535,7 @@ void choose(const Row& row) {
     case kSettingRow: change(row, 1); break;
     case kBack: close_menu(); break;
 #if defined(DUKE_NETPLAY)
-    case kWorldRow: case kLimitRow: case kFpsRow: change(row, 1); break;
+    case kWorldRow: case kLimitRow: change(row, 1); break;
     case kHost:
         ensure_client(); g_on.want_host = true; g_on.want_join = 0; g_on.mode = 0;
         show_message("opening a room...", Screen::Online);

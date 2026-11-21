@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #include "gba_bus.h"
@@ -34,6 +35,7 @@
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "scene/scene.h"
+#include "scene_hle.h"
 #if defined(DUKE_NETPLAY)
 #include "multiplayer_launch.h"
 #endif
@@ -46,6 +48,10 @@ constexpr std::uint32_t kPlaneFn = 0x0801F960u;      // draws one floor/ceiling 
 constexpr std::uint32_t kSegmentFn = 0x0801FABCu;    // called per wall segment drawn
 constexpr std::uint32_t kWallColumnFn = 0x03003624u;      // draws one wall column (ARM)
 constexpr std::uint32_t kWallColumnAgainFn = 0x0300342Cu; // the same, same column again
+constexpr std::uint32_t kScenePassFn = 0x080201CCu;   // scene pass entry
+constexpr std::uint32_t kWallFn = 0x080210A0u;        // per-wall routine (native: scene_hle.cpp)
+constexpr std::uint32_t kBoxTestFn = 0x03004640u;     // BSP child box test (IWRAM ARM)
+constexpr std::uint32_t kPlanesFn = 0x0801F92Cu;      // plane stage, after the BSP walk
 constexpr std::uint32_t kFlipWaitFn = 0x08021146u;    // loop polling the page-flip flag
 constexpr std::uint32_t kFlipPendingFlag = 0x03001194u; // non-zero until the VBlank flip
 constexpr std::uint32_t kDrawPage = 0x0F04;          // IWRAM: pointer to the page being drawn
@@ -114,26 +120,69 @@ constexpr unsigned kScenePassDiscountShift = 3;
 // decide from guest memory only), so the consoles stay identical. Only what is
 // host-side (the camera, which page holds overlay) follows this PC's console.
 bool g_match = false;
-bool g_match_fps60 = false;          // the room's FRAME RATE: 60 (DUKE_MATCH_FPS60)
-constexpr unsigned kMatchDiscountShift = 2;
 gba::GbaBus* g_local_bus = nullptr;
 
 int segment_hook(std::uint32_t, int, ArmCpuState*) {
     gba::GbaBus* bus = gbarecomp::active_bus();
-    // In link matches only when the room's host chose FRAME RATE: 60 (every
-    // PC runs both consoles: at 60 game frames a second that is about 18 ms
-    // per tick on the test PC, at the game's own pace, about 50 with the wall
-    // and floor pixels skipped, about 13). The framework keeps the discount
-    // per console and in the saved state. A quarter rather than an eighth:
-    // enough for 60 in open areas, and a heavy view costs at most a bounded
-    // amount more instead of eight times the scene pass.
+    // Link matches too: every console of every PC does the same (decided from
+    // guest memory), and the framework keeps the discount per console and in
+    // the saved state. With the native wall routine a match tick of both
+    // consoles costs about 12 ms on the test PC at 60 game frames a second.
     if (!g_settings.native || !bus || !in_bitmap_mode(bus)) return 0;
-    if (!g_match) g_runtime_cycle_discount_shift = kScenePassDiscountShift;
-    else if (g_match_fps60) g_runtime_cycle_discount_shift = kMatchDiscountShift;
+    g_runtime_cycle_discount_shift = kScenePassDiscountShift;
     return 0;   // observed only: the game's function runs as usual
 }
 
+// ---- diagnostic write probe (DUKE_SCENE_PROBE=<file>) --------------------------
+// Records every guest store between the scene pass's entry and its sprite
+// stage: which instruction wrote where, in which CPU mode. Used to find the
+// pass's effects that outlive it (what a native replacement must reproduce).
+struct ProbeStat { std::uint32_t lo = 0xFFFFFFFFu, hi = 0; std::uint64_t n = 0, changed = 0; std::uint32_t modes = 0; };
+struct SceneProbe : gba::BusWriteObserver {
+    std::map<std::uint64_t, ProbeStat> by_pc_page;   // (pc << 32) | (addr >> 8)
+    bool on_bus_write(gba::BusWriteRegion, std::uint32_t, std::uint32_t addr, std::uint8_t width,
+                      std::uint32_t old_value, std::uint32_t new_value) override {
+        ProbeStat& st = by_pc_page[(std::uint64_t(g_cpu.R[15]) << 32) | (addr >> 8)];
+        st.lo = std::min(st.lo, addr); st.hi = std::max(st.hi, addr + width - 1);
+        ++st.n; if (old_value != new_value) ++st.changed;
+        st.modes |= 1u << (g_cpu.cpsr & 15u);
+        return false;
+    }
+};
+SceneProbe* g_probe = nullptr;
+const char* g_probe_path = std::getenv("DUKE_SCENE_PROBE");
+unsigned g_probe_passes = 0;
+gba::GbaBus* g_probe_bus = nullptr;
+
+void probe_dump() {
+    std::FILE* f = std::fopen(g_probe_path, "w");
+    if (!f) return;
+    std::fprintf(f, "passes %u\n", g_probe_passes);
+    for (const auto& [key, st] : g_probe->by_pc_page)
+        std::fprintf(f, "pc %08X lo %08X hi %08X n %llu changed %llu modes %X\n", unsigned(key >> 32), st.lo, st.hi,
+                     static_cast<unsigned long long>(st.n), static_cast<unsigned long long>(st.changed), st.modes);
+    std::fclose(f);
+}
+
+int scene_start_hook(std::uint32_t, int, ArmCpuState*) {
+    if (!g_probe_path) return 0;
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || !in_bitmap_mode(bus)) return 0;
+    if (!g_probe) g_probe = new SceneProbe;
+    bus->set_write_observer(g_probe);
+    g_probe_bus = bus;
+    return 0;
+}
+
+void probe_end() {
+    if (!g_probe_bus) return;
+    g_probe_bus->set_write_observer(nullptr);
+    g_probe_bus = nullptr;
+    if (++g_probe_passes % 100 == 0) probe_dump();
+}
+
 int scene_end_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    probe_end();
     g_runtime_cycle_discount_shift = 0;
     if (!g_settings.native) return 0;
     gba::GbaBus* bus = gbarecomp::active_bus();
@@ -193,13 +242,145 @@ int flip_wait_hook(std::uint32_t, int, ArmCpuState* cpu) {
     return 0;                      // the loop runs on once the CPU wakes
 }
 
+// ---- native wall routine (scene_hle.cpp) ------------------------------------------
+// DUKE_HLE=0 leaves every wall to the game's code; DUKE_HLE=shadow runs the
+// native routine on a copy of RAM beside the game's own and compares what
+// both left behind (at the next wall, box test or the plane stage), printing
+// each difference; anything else uses the native routine for every wall it
+// supports.
+enum class HleMode { Off, On, Shadow };
+HleMode hle_mode() {
+    static const HleMode mode = [] {
+        const char* v = std::getenv("DUKE_HLE");
+        if (v && std::strcmp(v, "0") == 0) return HleMode::Off;
+        if (v && std::strcmp(v, "shadow") == 0) return HleMode::Shadow;
+        return HleMode::On;
+    }();
+    return mode;
+}
+
+unsigned long long g_check_box = 0, g_check_planes = 0;
+// One per console: a link match runs two, interleaved.
+struct ShadowCheck {
+    bool pending = false;
+    std::uint32_t seg = 0, sp = 0, lr = 0;
+    int result = 0;
+    std::vector<std::uint8_t> iw, ew;
+    std::uint64_t walls = 0, compared = 0, mismatched = 0;
+};
+std::map<const gba::GbaBus*, ShadowCheck> g_shadows;
+
+void shadow_region(gba::GbaBus* bus, ShadowCheck& g_shadow, const char* name, std::uint32_t addr, std::uint32_t size) {
+    const bool ewram = (addr >> 24) == 2;
+    const std::uint32_t off = addr & (ewram ? 0x3FFFFu : 0x7FFFu);
+    const std::uint8_t* game = (ewram ? bus->ewram_ptr() : bus->iwram_ptr()) + off;
+    const std::uint8_t* mine = (ewram ? g_shadow.ew.data() : g_shadow.iw.data()) + off;
+    if (std::memcmp(game, mine, size) == 0) return;
+    ++g_shadow.mismatched;
+    if (g_shadow.mismatched > 200) return;
+    for (std::uint32_t i = 0; i < size; ++i)
+        if (game[i] != mine[i]) {
+            const std::uint8_t* v = g_shadow.iw.data() + 0x2490;
+            std::fprintf(stderr, "[hle] seg %08X ret %d: %s differs at %08X: game %02X native %02X"
+                         " | segflags %04X tex %02X/%02X sky %d part %08X up %d low %d 24 %d mid %d\n",
+                         g_shadow.seg, g_shadow.result, name, addr + i, game[i], mine[i],
+                         rd16(g_shadow.ew.data() + (g_shadow.seg & 0x3FFFFu) + 0xE), v[4], v[5], int(rd32(v + 0x118)),
+                         rd32(v + 0xDC), int(rd32(v + 0x1C)), int(rd32(v + 0x20)), int(rd32(v + 0x24)),
+                         int(rd32(v + 0x74)));
+            break;
+        }
+}
+
+void shadow_compare(gba::GbaBus* bus) {
+    ShadowCheck& g_shadow = g_shadows[bus];
+    if (!g_shadow.pending) return;
+    g_shadow.pending = false;
+    ++g_shadow.compared;
+    const std::uint8_t* iw = bus->iwram_ptr();
+    shadow_region(bus, g_shadow, "clip", 0x03002730u, 0xF0);
+    shadow_region(bus, g_shadow, "closed", 0x03002690u, 0x78);
+    shadow_region(bus, g_shadow, "closed count", 0x0300266Cu, 4);
+    shadow_region(bus, g_shadow, "list count", 0x03002F00u, 4);
+    shadow_region(bus, g_shadow, "divide cache", 0x03003338u, 16);
+    shadow_region(bus, g_shadow, "plane rows", 0x03002D60u, 0xF0);
+    shadow_region(bus, g_shadow, "flag 2E80", 0x03002E80u, 4);
+    shadow_region(bus, g_shadow, "flag 28F0", 0x030028F0u, 4);
+    const std::uint32_t verts = rd32(iw + 0x2E7C), sides = rd32(iw + 0x2728), lines = rd32(iw + 0x2884);
+    const std::uint8_t* seg = bus->ewram_ptr() + (g_shadow.seg & 0x3FFFFu);
+    if ((g_shadow.seg >> 24) == 2) {
+        shadow_region(bus, g_shadow, "vertex 1", verts + 0x14u * rd16(seg + 0xA), 0x14);
+        shadow_region(bus, g_shadow, "vertex 2", verts + 0x14u * rd16(seg + 0xC), 0x14);
+        const std::uint32_t side = sides + 0x14u * rd16(seg + 6);
+        if ((side >> 24) == 2) {
+            const std::int16_t line = static_cast<std::int16_t>(rd16(bus->ewram_ptr() + (side & 0x3FFFFu) + 0xC));
+            shadow_region(bus, g_shadow, "line", lines + 0x14u * std::uint32_t(line), 0x14);
+        }
+    }
+    if (g_shadow.compared % 2000 == 1)
+        std::fprintf(stderr, "[hle] shadow: %llu walls compared, %llu differing regions (box checks %llu, plane checks %llu)\n",
+                     static_cast<unsigned long long>(g_shadow.compared),
+                     static_cast<unsigned long long>(g_shadow.mismatched), g_check_box, g_check_planes);
+}
+
+int hle_wall_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    const HleMode mode = hle_mode();
+    if (mode == HleMode::Off || !g_settings.native) return 0;
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || !in_bitmap_mode(bus)) return 0;
+    if (mode == HleMode::Shadow) {
+        // A console resumed between slices at this entry, before its first
+        // instruction, reaches the hook again for the same call.
+        const ShadowCheck& pending = g_shadows[bus];
+        if (pending.pending && pending.seg == cpu->R[0] && pending.sp == cpu->R[13] && pending.lr == cpu->R[14])
+            return 0;
+        shadow_compare(bus);
+    }
+    std::uint8_t* iw = bus->iwram_ptr();
+    std::uint8_t* ew = bus->ewram_ptr();
+    const std::uint32_t seg = cpu->R[0];
+    if (!dukehle::supported(iw, ew, seg)) {
+        static unsigned long long declined = 0;
+        if (mode == HleMode::Shadow && (++declined % 5000) == 1)
+            std::fprintf(stderr, "[hle] %llu walls left to the game\n", declined);
+        return 0;
+    }
+    if (mode == HleMode::On) {
+        cpu->R[0] = static_cast<std::uint32_t>(
+            dukehle::run(iw, ew, bus->rom_ptr(), bus->rom_size(), seg,
+                         static_cast<std::int32_t>(cpu->R[1]), static_cast<std::int32_t>(cpu->R[2])));
+        return skip_function(cpu);
+    }
+    ShadowCheck& g_shadow = g_shadows[bus];
+    g_shadow.iw.assign(iw, iw + 0x8000);
+    g_shadow.ew.assign(ew, ew + 0x40000);
+    g_shadow.result = dukehle::run(g_shadow.iw.data(), g_shadow.ew.data(), bus->rom_ptr(), bus->rom_size(), seg,
+                                   static_cast<std::int32_t>(cpu->R[1]), static_cast<std::int32_t>(cpu->R[2]));
+    g_shadow.seg = seg;
+    g_shadow.sp = cpu->R[13];
+    g_shadow.lr = cpu->R[14];
+    g_shadow.pending = true;
+    ++g_shadow.walls;
+    return 0;   // the game's own routine runs; compared at the next check point
+}
+
+int hle_check_hook(std::uint32_t addr, int, ArmCpuState*) {
+    if (hle_mode() != HleMode::Shadow) return 0;
+    ++(addr == kBoxTestFn ? g_check_box : g_check_planes);
+    if (gba::GbaBus* bus = gbarecomp::active_bus()) shadow_compare(bus);
+    return 0;
+}
+
 const int g_registered =
     gba_mod_register_function_entry_plugin(kHookId, kSceneEndFn, 1, scene_end_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kPlaneFn, 1, plane_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kWallColumnFn, 0, wall_column_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kWallColumnAgainFn, 0, wall_column_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kSegmentFn, 1, segment_hook) &&
-    gba_mod_register_function_entry_plugin(kHookId, kFlipWaitFn, 1, flip_wait_hook);
+    gba_mod_register_function_entry_plugin(kHookId, kFlipWaitFn, 1, flip_wait_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kScenePassFn, 1, scene_start_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kWallFn, 1, hle_wall_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kBoxTestFn, 0, hle_check_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kPlanesFn, 1, hle_check_hook);
 
 // ---- compositing ---------------------------------------------------------------
 std::vector<std::uint32_t> g_frame;
@@ -442,11 +623,6 @@ int present_frame(gbarecomp::RunOptions::PresentFrame* frame) {
 
 DukeSceneSettings* duke_scene_settings() { return &g_settings; }
 
-bool duke_match_fps60() {
-    const char* v = std::getenv("DUKE_MATCH_FPS60");
-    return v && *v && std::strcmp(v, "0") != 0;
-}
-
 void duke_scene_install(gbarecomp::RunOptions* opts) {
     opts->present_frame = present_frame;
 }
@@ -455,10 +631,8 @@ void duke_scene_install(gbarecomp::RunOptions* opts) {
 void duke_scene_install_match(gbarecomp::GbaNetplayLaunch* launch) {
     // The game's floor and sprite pixel work is skipped on every console of
     // every PC alike, so a match always uses the native renderer, whatever
-    // duke_pc.ini says. The scene pass is discounted only with FRAME RATE: 60
-    // (see segment_hook), which main.cpp folds into the match identity.
+    // duke_pc.ini says (the native wall routine and the 60 fps discount need it).
     g_match = true;
-    g_match_fps60 = duke_match_fps60();
     g_settings.native = 1;
     if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
     launch->present_frame = [](gbarecomp::GbaNetplayPresentFrame& frame) {

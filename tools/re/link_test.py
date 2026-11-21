@@ -47,6 +47,8 @@ if __name__ == "__main__":
                 "--netplay-bind", bind, "--netplay-peer", peer,
                 "--netplay-seat", str(seat), "--netplay-session", "4242",
                 "--netplay-checkpoint", str(OUT / f"seat{seat}.paired")]
+        # LINK_TEST_ARGS: extra options for both games, e.g. --netplay-delay-sync
+        argv += os.environ.get("LINK_TEST_ARGS", "").split()
         log = open(OUT / f"seat{seat}.log", "w")
         procs.append((subprocess.Popen(argv, cwd=EXE.parent, env=env, stdout=log, stderr=subprocess.STDOUT), log))
     for p, log in procs:
