@@ -131,6 +131,9 @@ int main(int argc, char** argv) {
         for (std::string& a : arg_strings) args.push_back(a.data());
     }
     netplay = opts.netplay->enabled;
+    // FRAME RATE: 60 changes how the consoles run, so peers that chose
+    // differently must not pair up.
+    if (netplay && duke_match_fps60()) opts.netplay->program_id += "-fps60";
 #endif
     opts.builtin_game_name = "Duke Nukem Advance";
     opts.builtin_rom_sha1  = "f01522ee46f5aa821adbba0a97b1a745ff9059f5";

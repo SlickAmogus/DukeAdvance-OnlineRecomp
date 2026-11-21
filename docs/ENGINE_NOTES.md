@@ -223,7 +223,8 @@ MULTIPLAYER (object flag bit 4) while that count is below 2.
   the single-player hooks (page clear at `0x08022EF8`, plane skip) run on
   every console of every PC alike (they decide from guest memory only); the
   camera and the overlay bookkeeping follow the local console's bus only.
-  The CPU discount is off in matches (see "Match cost" below).
+  The CPU discount applies only when the room's host chose FRAME RATE: 60
+  (see "Match cost" below).
 - SERVER SETUP (master only): GAME TYPE = DEATH MATCH only; WORLD starts on
   AREA 51, then EGYPT 1, EGYPT 2, SYDNEY 1, SYDNEY 2, ALIEN 1, ALIEN 2 (RIGHT
   steps, wraps); SET LIMIT starts on FIRST TO 10, then 20, 30, UNLIMITED,
@@ -238,24 +239,34 @@ MULTIPLAYER (object flag bit 4) while that count is below 2.
 ### Match cost
 
 Each PC runs both consoles. Measured with `GBA_SESSION_PROFILE=1` on a random
-walk through a deathmatch (`tools/re/link_test.py`), per tick of both
-consoles: about 20 ms before (63-cycle slices: about 25000 slice switches a
-tick, half the time in the per-instruction slice check); about 17 ms with the
-2048-cycle link lookahead and the cheaper checks; 24-33 ms with the scene-pass
-discount (the game then runs twice as many of its own frames). A tick has
-16.7 ms. Gameplay is now mostly the game's own code, above all the IWRAM wall
-column loop `0x03006300` (reached through the pointer at IWRAM `0x03002834`
-and the veneer `0x08002F50`, specialised per wall by `0x030060C4`), which
-both updates the clip arrays the rest of the frame uses and draws the wall
-pixels nobody sees under the native renderer. 60 game frames a second in a
-match needs that loop replaced natively (clip updates only).
+walk through a deathmatch (`tools/re/link_test.py`, two processes on one PC,
+which costs about 15% over one), per tick of both consoles; a tick has 16.7 ms:
+
+| State | ms per tick |
+|---|---|
+| 63-cycle slices (about 25000 slice switches a tick) | about 20 |
+| 2048-cycle link lookahead, cheaper checks (patch 0007) | about 17 |
+| plus wall pixels skipped, HALT in the flip wait, patch 0008 | about 13 (max about 17) |
+| the same with the scene pass discounted (FRAME RATE: 60) | about 18-20 |
+
+At the game's own pace it now reaches about 50 frames a second in open areas
+(30 originally). What remains is mostly the game's own scene pass (BSP walk,
+seg clipping and projection, the wall column loops `0x03006300` and
+`0x03006C10` without their pixel calls) times two consoles, and the session's
+per-instruction and per-slice bookkeeping (about 6500 scheduler passes a
+tick, bounded by device events). Profiles: gdb sampling of the running exe
+(`thread apply all bt`); generated functions are named `gf_tfunc_<addr>`.
 
 ## Frame pacing
 
 Before drawing the first wall of a frame the game waits in a loop
 (`0x08021146`) for the previous page flip, which its VBlank handler performs.
 So it can never exceed one frame per display refresh, and anything that makes
-the scene pass cheaper turns directly into frame rate up to 60.
+the scene pass cheaper turns directly into frame rate up to 60. The flag is
+IWRAM `0x03001194` (non-zero until the flip). A hook at `0x08021146` enters
+HALT instead of letting the CPU spin (the loop still runs after the wake-up);
+emulated, the spin cost as much host time as real work, about a third of a
+frame once the scene pass was cheap.
 
 ## Native renderer
 
@@ -267,6 +278,8 @@ both. Hooks (`[[mod_function_hook]]` in `recomp.toml`):
 |---|---|
 | `0x0801FABC` (per wall segment) | observed: start discounting the scene pass's emulated CPU time (1/8) |
 | `0x0801F960` (draw one plane) | skipped |
+| `0x03003624`, `0x0300342C` (IWRAM ARM: draw one wall column; called from the column loops with `mov lr, pc; bx`) | skipped: they only read the wall and column state and write pixels |
+| `0x08021146` (page-flip wait loop) | observed: enters HALT while the flag is set (all modes) |
 | `0x08022EF8` (sprite drawer, end of pass) | skipped; clears the bitmap page to index 0, latches the camera, ends the discount |
 
 A hook that skips a function must pop the runtime's call-return entry

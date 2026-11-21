@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -43,6 +44,10 @@ constexpr char kHookId[] = "duke.scene_end";
 constexpr std::uint32_t kSceneEndFn = 0x08022EF8u;   // sprite drawer, end of scene pass
 constexpr std::uint32_t kPlaneFn = 0x0801F960u;      // draws one floor/ceiling plane
 constexpr std::uint32_t kSegmentFn = 0x0801FABCu;    // called per wall segment drawn
+constexpr std::uint32_t kWallColumnFn = 0x03003624u;      // draws one wall column (ARM)
+constexpr std::uint32_t kWallColumnAgainFn = 0x0300342Cu; // the same, same column again
+constexpr std::uint32_t kFlipWaitFn = 0x08021146u;    // loop polling the page-flip flag
+constexpr std::uint32_t kFlipPendingFlag = 0x03001194u; // non-zero until the VBlank flip
 constexpr std::uint32_t kDrawPage = 0x0F04;          // IWRAM: pointer to the page being drawn
 constexpr std::uint32_t kMirrorPass = 0x28DC;        // IWRAM: non-zero during a mirror pass
 constexpr std::uint32_t kViewX = 0x2E64, kViewY = 0x2870, kViewZ = 0x2828, kViewAngle = 0x2820;
@@ -109,17 +114,22 @@ constexpr unsigned kScenePassDiscountShift = 3;
 // decide from guest memory only), so the consoles stay identical. Only what is
 // host-side (the camera, which page holds overlay) follows this PC's console.
 bool g_match = false;
+bool g_match_fps60 = false;          // the room's FRAME RATE: 60 (DUKE_MATCH_FPS60)
+constexpr unsigned kMatchDiscountShift = 2;
 gba::GbaBus* g_local_bus = nullptr;
 
 int segment_hook(std::uint32_t, int, ArmCpuState*) {
     gba::GbaBus* bus = gbarecomp::active_bus();
-    // Not in link matches yet: there every PC runs both consoles, and at the
-    // game's 60 frames a second that cost about 24-33 ms per tick on the test
-    // PC (well over the 16.7 ms a tick has); at its own pace about 17. The
-    // framework keeps the discount per console and in the saved state, so it
-    // can be switched on for matches once the scene pass is cheaper.
-    if (g_settings.native && bus && in_bitmap_mode(bus) && !g_match)
-        g_runtime_cycle_discount_shift = kScenePassDiscountShift;
+    // In link matches only when the room's host chose FRAME RATE: 60 (every
+    // PC runs both consoles: at 60 game frames a second that is about 18 ms
+    // per tick on the test PC, at the game's own pace, about 50 with the wall
+    // and floor pixels skipped, about 13). The framework keeps the discount
+    // per console and in the saved state. A quarter rather than an eighth:
+    // enough for 60 in open areas, and a heavy view costs at most a bounded
+    // amount more instead of eight times the scene pass.
+    if (!g_settings.native || !bus || !in_bitmap_mode(bus)) return 0;
+    if (!g_match) g_runtime_cycle_discount_shift = kScenePassDiscountShift;
+    else if (g_match_fps60) g_runtime_cycle_discount_shift = kMatchDiscountShift;
     return 0;   // observed only: the game's function runs as usual
 }
 
@@ -154,10 +164,42 @@ int plane_hook(std::uint32_t, int, ArmCpuState* cpu) {
     return skip_function(cpu);
 }
 
+// The game's wall column drawers (IWRAM ARM) likewise only write pixels; the
+// column loops that call them keep every clip-array, plane and sprite-clip
+// update. Reached with `mov lr, pc; bx rN` from the loops.
+int wall_column_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    if (!g_settings.native) return 0;
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || !in_bitmap_mode(bus)) return 0;
+    return skip_function(cpu);
+}
+
+// The game waits for its previous page flip (done by its VBlank handler, which
+// clears the byte r1 points at) by polling that byte in a three-instruction
+// loop. Emulated, the spin costs as much host time as real work, and with the
+// scene pass discounted or skipped most of a frame is spent there. Entering
+// HALT instead does what the loop does: nothing until an interrupt, whose
+// handler clears the byte. Decided from guest state only, so every console of
+// a link match does the same. Not entered with an interrupt already pending
+// (HALT would end at once) or with interrupts off (only the loop itself is
+// faithful then).
+int flip_wait_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || cpu->R[1] != kFlipPendingFlag) return 0;
+    if (bus->iwram_ptr()[kFlipPendingFlag & 0x7FFFu] == 0) return 0;
+    const gba::GbaIo& io = bus->io();
+    if (!io.ime() || !(io.ie() & 1u) || (io.ie() & io.if_reg()) || (cpu->cpsr & 0x80u)) return 0;
+    bus->write8(0x04000301u, 0);   // HALTCNT: halt until IE & IF
+    return 0;                      // the loop runs on once the CPU wakes
+}
+
 const int g_registered =
     gba_mod_register_function_entry_plugin(kHookId, kSceneEndFn, 1, scene_end_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kPlaneFn, 1, plane_hook) &&
-    gba_mod_register_function_entry_plugin(kHookId, kSegmentFn, 1, segment_hook);
+    gba_mod_register_function_entry_plugin(kHookId, kWallColumnFn, 0, wall_column_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kWallColumnAgainFn, 0, wall_column_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kSegmentFn, 1, segment_hook) &&
+    gba_mod_register_function_entry_plugin(kHookId, kFlipWaitFn, 1, flip_wait_hook);
 
 // ---- compositing ---------------------------------------------------------------
 std::vector<std::uint32_t> g_frame;
@@ -400,6 +442,11 @@ int present_frame(gbarecomp::RunOptions::PresentFrame* frame) {
 
 DukeSceneSettings* duke_scene_settings() { return &g_settings; }
 
+bool duke_match_fps60() {
+    const char* v = std::getenv("DUKE_MATCH_FPS60");
+    return v && *v && std::strcmp(v, "0") != 0;
+}
+
 void duke_scene_install(gbarecomp::RunOptions* opts) {
     opts->present_frame = present_frame;
 }
@@ -408,8 +455,10 @@ void duke_scene_install(gbarecomp::RunOptions* opts) {
 void duke_scene_install_match(gbarecomp::GbaNetplayLaunch* launch) {
     // The game's floor and sprite pixel work is skipped on every console of
     // every PC alike, so a match always uses the native renderer, whatever
-    // duke_pc.ini says. (The scene pass is not discounted yet: see above.)
+    // duke_pc.ini says. The scene pass is discounted only with FRAME RATE: 60
+    // (see segment_hook), which main.cpp folds into the match identity.
     g_match = true;
+    g_match_fps60 = duke_match_fps60();
     g_settings.native = 1;
     if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
     launch->present_frame = [](gbarecomp::GbaNetplayPresentFrame& frame) {

@@ -59,13 +59,20 @@ try:
         ok &= s["room"] == code
         s = wait(host, lambda s: s["members"] >= 2)
         print("host sees", s["members"], "players", s["rows"])
-        ok &= s["rows"][:3] == ["WORLD: AREA 51", "LIMIT: FIRST TO 10", "START"]
+        ok &= s["rows"][:4] == ["WORLD: AREA 51", "LIMIT: FIRST TO 10", "FRAME RATE: GAME", "START"]
         # The host picks EGYPT 2 (two steps right); the guest must see it.
         ui(host, key="right"); host.run(5); ui(host, key="right"); host.run(5)
         s = wait(guest, lambda s: s["rows"][:1] == ["WORLD: EGYPT 2"])
         print("guest sees", s["rows"][:2])
         ok &= s["rows"][:1] == ["WORLD: EGYPT 2"]
+        # And FRAME RATE: 60, which both restarted games must agree on (it is
+        # part of the match identity, so a mismatch would never connect).
         ui(host, key="down"); host.run(5); ui(host, key="down"); host.run(5)
+        ui(host, key="right"); host.run(5)
+        s = wait(guest, lambda s: s["rows"][2:3] == ["FRAME RATE: 60"])
+        print("guest sees", s["rows"][2:3])
+        ok &= s["rows"][2:3] == ["FRAME RATE: 60"]
+        ui(host, key="down"); host.run(5)
         ui(host, key="ok")
         alive = [host, guest]
         for _ in range(200):

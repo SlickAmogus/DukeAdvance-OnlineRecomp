@@ -35,6 +35,7 @@ git apply ../DukeAdvanceRecomp/patches/0001-*.patch ../DukeAdvanceRecomp/patches
 git -C external/arm-recomp-core apply ../../../DukeAdvanceRecomp/patches/0004-*.patch
 git apply ../DukeAdvanceRecomp/patches/0005-*.patch ../DukeAdvanceRecomp/patches/0006-*.patch
 git apply ../DukeAdvanceRecomp/patches/0007-*.patch   # needs the fork's netplay commits (agreed opening)
+git apply ../DukeAdvanceRecomp/patches/0008-*.patch
 ```
 
 Or clone the fork that already carries them (shared with the GTA Advance
@@ -48,6 +49,7 @@ recomp): `git clone --recurse-submodules -b pc-ports https://github.com/SlickAmo
 | `0005` | Exclusive fullscreen keeps the desktop's resolution (it used to switch the monitor to a tiny mode), and switching between borderless and exclusive no longer leaves the picture in a corner. |
 | `0006` | Byte writes to the timer registers start and stop timers as on hardware. The game's link code starts its transfer timer that way; without it MULTIPLAYER never sees the other console. |
 | `0007` | Link matches: a console may run up to 2048 cycles ahead while the cable is in 115200-baud multiplayer mode (instead of 63), a cheaper per-instruction check, faster checks of self-modifying RAM code, and the CPU time discount kept per console and in the saved state. |
+| `0008` | Link matches, faster again: a halted console stops at once (the game's frame wait halts instead of spinning), the per-instruction check answers common instructions inline, a faster state hash, no ROM rescan on every rollback, and cheaper RAM-code checks. |
 
 ## Build (Windows)
 
@@ -107,9 +109,9 @@ everything, exactly as on two linked GBAs.
 **ONLINE**: on the main menu, Down from OPTIONS (or point at MULTIPLAYER)
 selects MULTIPLAYER, which opens the online menu: host a game, find games,
 join by a room code, set your name, chat. When both players are in the room
-the host picks the WORLD (AREA 51, EGYPT 1-2, SYDNEY 1-2, ALIEN 1-2) and the
-LIMIT (first to 10/20/30 frags, unlimited, 5/10/20 minutes), which the other
-player sees, then START. Both games restart and boot straight into the
+the host picks the WORLD (AREA 51, EGYPT 1-2, SYDNEY 1-2, ALIEN 1-2), the
+LIMIT (first to 10/20/30 frags, unlimited, 5/10/20 minutes) and the FRAME
+RATE (GAME or 60), which the other player sees, then START. Both games restart and boot straight into the
 deathmatch: every PC first runs the agreed menu walk on its own at full speed
 (about 15 s, a progress screen meanwhile; the framework's agreed opening),
 then the two connect and play from the first frame of the level.
@@ -121,11 +123,14 @@ its own instance for this game). Your name and the server are in
 During a match only the keyboard bindings of `input.ini` play (arrows, Z
 fires, X jumps, C/V strafe, Enter, Right Shift): mouse aim and the WASD
 layout change the game's memory directly, which would make the two consoles
-drift apart. The native renderer always draws matches. The game's floor and sprite pixel
-work is skipped on every console of both PCs alike (the consoles stay
-identical), but the game keeps its own pace, about 30 frames a second in open
-areas: each PC runs both consoles, and at 60 the two cost more than a frame's
-time on the test PC. `crash.log` (and `crash.dmp`) appear next to the game if
+drift apart. The native renderer always draws matches. The game's wall, floor and sprite
+pixel work is skipped on every console of both PCs alike (the consoles stay
+identical), and its wait for the next frame halts instead of spinning. With
+FRAME RATE: GAME the game keeps its own pace, about 50 frames a second in open
+areas (30 on the GBA), at about 13 ms of a 16.7 ms frame on the test PC.
+FRAME RATE: 60 runs it at 60 like single player, which costs about 18 ms
+there: each PC runs both consoles, so pick it only when both PCs are fast.
+Both games must use the same choice; the room sees to that. `crash.log` (and `crash.dmp`) appear next to the game if
 it ever crashes; a match that stops on missing game code says so in its log.
 
 Direct links without a server work too:
