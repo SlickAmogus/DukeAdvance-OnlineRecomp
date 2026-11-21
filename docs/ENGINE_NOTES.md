@@ -220,15 +220,35 @@ MULTIPLAYER (object flag bit 4) while that count is below 2.
   (GAME TYPE, WORLD, SET LIMIT, LAUNCH), the other WAITING FOR SERVER; after
   LAUNCH the other confirms the settings with A, then the master with A.
 - Native renderer in matches (`scene_host.cpp`, `duke_scene_install_match`):
-  observe-only. The frame routine `0x08020074` runs the scene pass
-  (`0x080201CC`), then calls the getter `0x0800C734`; a hook on that getter
-  (only when the return address is inside `0x08020074..0x080200F8`, and only
-  for the local console's bus) copies the drawn page and the camera. The
-  weapon and messages are drawn after it, so at present time any pixel of the
-  shown page that differs from its copy is overlay (holes closed by a
-  neighbour rule). No page clear, plane skip or CPU discount, so matches keep
-  the game's own pace. Verified with `tools/re/link_test.py`: both seats
-  agree on the final checkpoint and `seatN_*_game.ppm` show the native view.
+  the single-player hooks (page clear at `0x08022EF8`, plane skip) run on
+  every console of every PC alike (they decide from guest memory only); the
+  camera and the overlay bookkeeping follow the local console's bus only.
+  The CPU discount is off in matches (see "Match cost" below).
+- SERVER SETUP (master only): GAME TYPE = DEATH MATCH only; WORLD starts on
+  AREA 51, then EGYPT 1, EGYPT 2, SYDNEY 1, SYDNEY 2, ALIEN 1, ALIEN 2 (RIGHT
+  steps, wraps); SET LIMIT starts on FIRST TO 10, then 20, 30, UNLIMITED,
+  5 MIN, 10 MIN, 20 MIN. After DOWN onto a row its value box slides in for
+  about 60 ticks and a RIGHT pressed meanwhile is lost. `pc_menu.cpp`
+  `opening_rows` writes the whole walk as the framework's agreed opening.
+- Code a match needs that single player reached through the interpreter:
+  IWRAM routines `0x03003CFC`, `0x03003EDC` (the first ran once the other
+  player was on screen); return points of `mov lr, pc; bx rN` calls; targets
+  of Thumb code-pointer tables (`tools/scan_seeds.py` finds all three kinds).
+
+### Match cost
+
+Each PC runs both consoles. Measured with `GBA_SESSION_PROFILE=1` on a random
+walk through a deathmatch (`tools/re/link_test.py`), per tick of both
+consoles: about 20 ms before (63-cycle slices: about 25000 slice switches a
+tick, half the time in the per-instruction slice check); about 17 ms with the
+2048-cycle link lookahead and the cheaper checks; 24-33 ms with the scene-pass
+discount (the game then runs twice as many of its own frames). A tick has
+16.7 ms. Gameplay is now mostly the game's own code, above all the IWRAM wall
+column loop `0x03006300` (reached through the pointer at IWRAM `0x03002834`
+and the veneer `0x08002F50`, specialised per wall by `0x030060C4`), which
+both updates the clip arrays the rest of the frame uses and draws the wall
+pixels nobody sees under the native renderer. 60 game frames a second in a
+match needs that loop replaced natively (clip updates only).
 
 ## Frame pacing
 

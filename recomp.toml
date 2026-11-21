@@ -96,14 +96,6 @@ note = "pitch recentre guard (negative side)"
 # hook replaces it by clearing the bitmap page, so that everything the game
 # draws afterwards (weapon, messages) can be told apart from the 3D view. With
 # the hook disabled or declining, the original function runs unchanged.
-# 0x0800C734 is a small getter; its first call from the frame routine
-# 0x08020074 comes right after the scene pass, before the weapon is drawn.
-# Link matches take a copy of the finished 3D view there (observed only).
-[[mod_function_hook]]
-addr = 0x0800C734
-mode = "thumb"
-note = "after the scene pass: link-match native renderer snapshot (observed only)"
-
 [[mod_function_hook]]
 addr = 0x08022EF8
 mode = "thumb"
@@ -644,3 +636,16 @@ note = "netplay: reached with no native entry (link test)"
 addr = 0x03003CA8
 mode = "arm"
 note = "netplay: reached with no native entry (link test)"
+
+# The routines after it in the same IWRAM block (stmfd after a bx lr). 0x03003CFC
+# was reached in a deathmatch once both players were in view of each other
+# ("multiplayer native dispatch entry is missing"); 0x03003EDC is its twin.
+[[extra_func]]
+addr = 0x03003CFC
+mode = "arm"
+note = "netplay: reached when the other player is on screen"
+
+[[extra_func]]
+addr = 0x03003EDC
+mode = "arm"
+note = "netplay: same routine shape as 0x03003CFC"

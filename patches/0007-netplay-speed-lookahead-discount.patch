@@ -1,0 +1,318 @@
+﻿From c4739017e7e5f83884aac39249bb14ef768f3b1d Mon Sep 17 00:00:00 2001
+From: Chris Hardin <kushastronaut@icloud.com>
+Date: Sat, 21 Nov 2026 11:41:59 -0500
+Subject: [PATCH] Netplay speed: link lookahead, cheaper slice checks,
+ per-machine CPU discount
+
+- GbaNetplayLaunch::link_lookahead (opt-in, 0 = off as before): while every
+  cable port is in multiplayer mode a native slice may run up to that many
+  cycles, kept under one transfer at the current baud rate
+  (GbaLinkHub::safe_lookahead), instead of 63. Folded into the identity.
+  Duke Nukem Advance (115200 baud) uses 2048: slice switches per frame fell
+  from about 25000 to about 6000.
+- multiplayer_slice_safe: ARM fast path from the opcode bits (branches,
+  data processing, multiplies, immediate-offset LDR/STR) before the decoded
+  path; same answers, no hash lookup per instruction.
+- Native RAM templates: masked templates compare their fixed runs with
+  memcmp and only partly masked bytes one by one (same answer).
+- The CPU time discount (g_runtime_cycle_discount_shift and its remainder)
+  is part of RuntimeTimingContext and of each machine's saved session state
+  (state version 3), and runtime_tick honours it in session execution, so a
+  game hook that discounts a pass charges the same time on every peer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XhB6DUH6UsxVFSPFS3MfuH
+---
+ src/armv4t/runtime_arm.cpp          | 30 +++++++++++++++++++++++++++--
+ src/gba/gba_link_hub.cpp            |  7 +++++++
+ src/gba/gba_link_hub.h              |  5 +++++
+ src/runtime/multiplayer_launch.h    |  4 ++++
+ src/runtime/multiplayer_runner.cpp  |  4 +++-
+ src/runtime/multiplayer_session.cpp | 11 ++++++-----
+ src/runtime/multiplayer_session.h   |  6 ++++++
+ src/runtime/multiplayer_slice.cpp   | 23 ++++++++++++++++++++++
+ src/runtime/runtime_bus_bridge.cpp  | 18 ++++++++++++++++-
+ src/runtime/runtime_bus_bridge.h    |  5 +++++
+ 10 files changed, 104 insertions(+), 9 deletions(-)
+
+diff --git a/src/armv4t/runtime_arm.cpp b/src/armv4t/runtime_arm.cpp
+index 007a7c6..5f9ffaf 100644
+--- a/src/armv4t/runtime_arm.cpp
++++ b/src/armv4t/runtime_arm.cpp
+@@ -953,8 +953,34 @@ const RuntimeNativeRamEntry* lookup_native_ram(uint32_t pc, bool thumb,
+         const auto* bytes = g_runtime_ram_code_view(base, t.size);
+         if (!bytes) return false;
+         bool equal=t.masks ? true : std::memcmp(bytes,t.bytes,t.size)==0;
+-        if (t.masks) for (uint32_t n=0;n<t.size;++n)
+-            equal &= ((bytes[n]^t.bytes[n]) & t.masks[n])==0;
++        if (t.masks) {
++            // Masked templates (self-modifying code) are almost entirely
++            // fixed bytes: compare those runs with memcmp and only the few
++            // partly masked bytes one at a time. Runs are found once per
++            // template; same answer as comparing every byte under its mask.
++            struct Run { uint32_t start, size; bool exact; };
++            static std::vector<std::vector<Run>> runs;
++            if (runs.size() < g_native_ram_template_count) runs.resize(g_native_ram_template_count);
++            auto& r = runs[e.template_index];
++            if (r.empty()) {
++                for (uint32_t n=0;n<t.size;) {
++                    const bool exact=t.masks[n]==0xFFu;
++                    uint32_t m=n+1;
++                    while (m<t.size && (t.masks[m]==0xFFu)==exact) ++m;
++                    r.push_back({n,m-n,exact});
++                    n=m;
++                }
++            }
++            for (const Run& run : r) {
++                if (run.exact) {
++                    if (std::memcmp(bytes+run.start,t.bytes+run.start,run.size)) { equal=false; break; }
++                } else {
++                    for (uint32_t n=run.start;n<run.start+run.size;++n)
++                        if (((bytes[n]^t.bytes[n]) & t.masks[n])!=0) { equal=false; break; }
++                    if (!equal) break;
++                }
++            }
++        }
+         if (equal) return true;
+         if (runtime_trace_enabled()) {
+             for (uint32_t n=0;n<t.size;++n)
+diff --git a/src/gba/gba_link_hub.cpp b/src/gba/gba_link_hub.cpp
+index c5687d2..ba41d1d 100644
+--- a/src/gba/gba_link_hub.cpp
++++ b/src/gba/gba_link_hub.cpp
+@@ -45,6 +45,13 @@ bool GbaLinkHub::normal(std::size_t port) const {
+     const auto& p=ports_[port];
+     return !(p.rcnt&0x8000) && !(p.control&0x2000);
+ }
++std::uint32_t GbaLinkHub::safe_lookahead(std::uint32_t cap) const {
++    constexpr std::uint32_t kNormalFastest = 63;
++    for (std::size_t i = 0; i < count_; ++i)
++        if (!multiplayer(i)) return std::min(cap, kNormalFastest);
++    const auto duration = kTransferCycles[ports_[0].control & 3][count_ - 2];
++    return std::max(kNormalFastest, std::min(cap, duration - 1));
++}
+ bool GbaLinkHub::ready() const {
+     for (std::size_t i = 0; i < count_; ++i)
+         if (!endpoints_[i]->connected() || !multiplayer(i)) return false;
+diff --git a/src/gba/gba_link_hub.h b/src/gba/gba_link_hub.h
+index 5b9c02a..c5eb0a4 100644
+--- a/src/gba/gba_link_hub.h
++++ b/src/gba/gba_link_hub.h
+@@ -28,6 +28,11 @@ public:
+     bool synchronized() const;
+     bool transfer_active() const { return active_; }
+     std::uint64_t completion_cycle() const { return finish_; }
++    // How far one console may run ahead of the cable's clock without a newly
++    // started transfer completing unseen: under one multiplayer transfer at
++    // the current baud rate while every port is in multiplayer mode, else 63
++    // (an 8-bit normal-mode transfer at 2 MHz takes 64 cycles). Never above cap.
++    std::uint32_t safe_lookahead(std::uint32_t cap) const;
+     std::vector<std::uint8_t> save_state() const;
+     // Transactional: malformed or differently wired state leaves hub intact.
+     bool load_state(std::span<const std::uint8_t> bytes, std::string* error);
+diff --git a/src/runtime/multiplayer_launch.h b/src/runtime/multiplayer_launch.h
+index 0450523..1d90afa 100644
+--- a/src/runtime/multiplayer_launch.h
++++ b/src/runtime/multiplayer_launch.h
+@@ -90,6 +90,10 @@ struct GbaNetplayLaunch {
+     // within three seconds (present_frame sees leave_armed meanwhile).
+     // Closing the window always leaves.
+     bool escape_leaves=true;
++    // Game capability, 0 = off: native slices may run this many cycles ahead
++    // while the cable is in multiplayer mode (GbaMultiplayerSession::
++    // set_link_lookahead). Far fewer slice switches; folded into the identity.
++    std::uint32_t link_lookahead=0;
+     // Told once how the match ended, just before run returns or throws:
+     // local = this player left; otherwise reason says what happened.
+     std::function<void(bool local,const std::string& reason)> on_end;
+diff --git a/src/runtime/multiplayer_runner.cpp b/src/runtime/multiplayer_runner.cpp
+index 8317004..ffda727 100644
+--- a/src/runtime/multiplayer_runner.cpp
++++ b/src/runtime/multiplayer_runner.cpp
+@@ -65,6 +65,7 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
+     config.links={std::move(link)};
+     GbaMultiplayerSession simulation(std::move(config));
+     simulation.set_native_slices(true);
++    simulation.set_link_lookahead(launch.link_lookahead);
+     for (unsigned id=0;id<players;++id) {
+         auto& m=simulation.machine(id);
+         m.ppu.set_rasterization_enabled(false);
+@@ -111,7 +112,8 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
+     options.identity=std::string(launch.medium==GbaLinkMedium::Wireless ? "gba-wireless/1:" : "gba-cable/1:")+launch.program_id+":"+launch.build_identity+":"+
+         boot.expected_rom_sha1+":"+boot.bios->sha1_hex()+":"+
+         std::to_string(static_cast<unsigned>(boot.save.type))+":"+std::to_string(boot.save.size)+":"+
+-        gba_netplay_seat_identity(launch)+":native-lle";
++        gba_netplay_seat_identity(launch)+":native-lle"+
++        (launch.link_lookahead ? ":link-lookahead="+std::to_string(launch.link_lookahead) : std::string());
+     const auto identity_digest=gba::sha1(reinterpret_cast<const std::uint8_t*>(options.identity.data()),options.identity.size());
+     options.build_fingerprint=std::uint32_t(identity_digest.bytes[0])|
+         (std::uint32_t(identity_digest.bytes[1])<<8)|(std::uint32_t(identity_digest.bytes[2])<<16)|
+diff --git a/src/runtime/multiplayer_session.cpp b/src/runtime/multiplayer_session.cpp
+index 41074c3..428f4c3 100644
+--- a/src/runtime/multiplayer_session.cpp
++++ b/src/runtime/multiplayer_session.cpp
+@@ -41,7 +41,7 @@ template<class Archive, class Context> void execution_state(Archive& a, Context&
+ }
+ template<class Archive> void manifest(Archive& a, const GbaSessionConfig& config) {
+     a.identity(std::uint32_t{0x53534247}); // GBSS
+-    a.identity(std::uint32_t{2});
++    a.identity(std::uint32_t{3}); // 3: per-machine CPU time discount in the state
+     a.identity(static_cast<std::uint32_t>(config.machines.size()));
+     for (const auto& m : config.machines) {
+         a.identity(m.id); a.text_identity(m.program_id); a.text_identity(m.rom_sha1); a.identity(m.boot);
+@@ -191,7 +191,8 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
+                 // No newly started cable transfer can complete within this
+                 // lookahead (normal 8-bit fast clock takes 64 cycles).
+                 // Existing device events and the caller's boundary shorten it.
+-                auto deadline=cycle_+std::min<std::uint64_t>(target-cycle_,63);
++                const std::uint64_t window=link_lookahead_ && cable_ ? cable_->safe_lookahead(link_lookahead_) : 63;
++                auto deadline=cycle_+std::min<std::uint64_t>(target-cycle_,window);
+                 for (const auto& machine : machines_) {
+                     const auto& device_io=machine->bus.io();
+                     auto distance=std::min({machine->ppu.cycles_until_next_event(),
+@@ -289,7 +290,7 @@ std::vector<std::uint8_t> GbaMultiplayerSession::save_state(GbaSessionStateLayou
+     for (const auto& ptr : machines_) {
+         const auto& m = *ptr;
+         execution_state(a,m.execution);
+-        a(m.timing.cycles,m.timing.vblank_starts);
++        a(m.timing.cycles,m.timing.vblank_starts,m.timing.discount_shift,m.timing.discount_carry);
+         a.write_section(4*1024*1024,[&](auto& section) {
+             gba::append_device_state(section,m.bus,m.ppu);
+         });
+@@ -319,7 +320,7 @@ bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std:
+             to.execution = from.execution; // retain trusted program callbacks
+             to.immediate_override_is_observer = from.immediate_override_is_observer;
+             execution_state(a,to.execution);
+-            a(to.timing.cycles,to.timing.vblank_starts);
++            a(to.timing.cycles,to.timing.vblank_starts,to.timing.discount_shift,to.timing.discount_carry);
+             std::vector<std::uint8_t> device;
+             a.vector(device,4*1024*1024);
+             if (!gba::load_device_state(to.bus,to.ppu,device))
+@@ -372,7 +373,7 @@ std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts() const {
+         auto& a = i ? rest : first;
+         const auto& m = *machines_[i];
+         execution_state(a,m.execution);
+-        a(m.timing.cycles,m.timing.vblank_starts);
++        a(m.timing.cycles,m.timing.vblank_starts,m.timing.discount_shift,m.timing.discount_carry);
+         a.write_section(4*1024*1024,[&](auto& section) {
+             gba::append_device_state(section,m.bus,m.ppu);
+         });
+diff --git a/src/runtime/multiplayer_session.h b/src/runtime/multiplayer_session.h
+index f9fc06f..2203860 100644
+--- a/src/runtime/multiplayer_session.h
++++ b/src/runtime/multiplayer_session.h
+@@ -69,6 +69,11 @@ public:
+     // Differential reference for the host-only device ownership path. The
+     // interval, device order and serialized simulation state are unchanged.
+     void set_owned_device_intervals(bool enabled) { owned_device_intervals_ = enabled; }
++    // Opt-in (0 = off): a native slice may run up to this many cycles while
++    // every cable port is in multiplayer mode, kept under one transfer at the
++    // current baud rate (GbaLinkHub::safe_lookahead). Off, slices stop at 63.
++    // Deterministic from guest state; part of the match identity.
++    void set_link_lookahead(std::uint32_t cycles) { link_lookahead_ = cycles; }
+     std::uint64_t cycle() const { return cycle_; }
+     std::size_t machine_count() const { return machines_.size(); }
+     gba::GbaLinkHub& cable();
+@@ -84,5 +89,6 @@ private:
+     bool native_slices_ = false;
+     bool return_yields_ = true;
+     bool owned_device_intervals_ = true;
++    std::uint32_t link_lookahead_ = 0;
+ };
+ } // namespace gbarecomp
+diff --git a/src/runtime/multiplayer_slice.cpp b/src/runtime/multiplayer_slice.cpp
+index 00076f3..e8e6675 100644
+--- a/src/runtime/multiplayer_slice.cpp
++++ b/src/runtime/multiplayer_slice.cpp
+@@ -41,6 +41,29 @@ bool multiplayer_slice_safe(const gba::GbaBus& bus,const ArmCpuState& cpu) {
+     // Thumb formats 1..5 contain only ALU/register/branch operations. These
+     // dominate ordinary game code and need no decoded-memory metadata.
+     if (thumb && word < 0x4800u) return true;
++    // ARM fast path, straight from the opcode bits (this runs before every
++    // guest instruction of a link session, and ARM inner loops such as IWRAM
++    // rasterisers otherwise pay a hash lookup each time). Same answers as the
++    // decoded path below; anything not listed here falls through to it.
++    if (!thumb && (word>>28)!=0xF) {
++        const auto cls=word&0x0E000000u;
++        if (cls==0x0A000000u) return true;                       // B, BL
++        if (cls==0x02000000u) return true;                       // data processing / MSR, immediate
++        if (cls==0x00000000u) {
++            // Register-operand data processing, multiplies, BX, MRS/MSR are
++            // plain; halfword/signed transfers and SWP (bit 7 and bit 4 set,
++            // with a non-zero SH field or the SWP pattern) are memory accesses.
++            if ((word&0x90u)!=0x90u) return true;
++            if ((word&0x60u)==0 && (word&0x0FB00FF0u)!=0x01000090u) return true;   // MUL/MLA/long multiplies
++        } else if (cls==0x04000000u) {
++            // LDR/STR/LDRB/STRB, immediate offset.
++            const unsigned rn=(word>>16)&15;
++            auto base=rn==15 ? pc+8u : cpu.R[rn];
++            const auto off=word&0xFFFu;
++            const auto address=(word&(1u<<24)) ? ((word&(1u<<23)) ? base+off : base-off) : base;
++            return plain_memory(address&~3u,(address&~3u)+3,(word&(1u<<20))!=0);
++        }
++    }
+     // Classification depends on opcode bits and live registers, not on the
+     // decode PC. Thumb's finite opcode space permits direct lookup instead of
+     // hashing the guest PC at every generated instruction. Read actual bytes
+diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
+index 1a925f2..06f333d 100644
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -811,7 +811,19 @@ static void account_host_service_instructions(uint32_t count) {
+ }
+ 
+ extern "C" void runtime_tick(uint32_t cycles) {
+-    if (g_session_execution) { g_runtime_cycles += cycles; return; }
++    if (g_session_execution) {
++        // Link sessions honour a game's CPU time discount too; the shift and
++        // remainder belong to the bound machine (RuntimeTimingContext) and
++        // are part of its saved state, so every peer charges the same time.
++        if (g_runtime_cycle_discount_shift) {
++            const unsigned shift = g_runtime_cycle_discount_shift > 8u ? 8u : g_runtime_cycle_discount_shift;
++            g_cycle_discount_carry += cycles;
++            cycles = g_cycle_discount_carry >> shift;
++            g_cycle_discount_carry &= (1u << shift) - 1u;
++        }
++        g_runtime_cycles += cycles;
++        return;
++    }
+     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
+     // cycle cost (for the cycle diff); the interpreter pass already pumped the
+     // devices / delivered IRQs for this window, so do nothing else here.
+@@ -1331,6 +1343,8 @@ void runtime_capture_timing_context(RuntimeTimingContext& out) {
+     out.yielded_vblank = g_runtime_yielded_vblank_start;
+     out.pending_cycles = g_pending_cycles;
+     out.event_budget = g_event_budget;
++    out.discount_shift = g_runtime_cycle_discount_shift;
++    out.discount_carry = g_cycle_discount_carry;
+ }
+ bool native_service_window_allowed() {
+     return !g_session_execution && !g_runtime_shadow_tick;
+@@ -1348,6 +1362,8 @@ void runtime_restore_timing_context(const RuntimeTimingContext& in) {
+     g_runtime_yielded_vblank_start = in.yielded_vblank;
+     g_pending_cycles = in.pending_cycles;
+     g_event_budget = in.event_budget;
++    g_runtime_cycle_discount_shift = in.discount_shift;
++    g_cycle_discount_carry = in.discount_carry;
+     // These are speculative idle proofs, not guest state. Invalidating them
+     // on rebinding prevents one machine's proof being applied to another.
+     g_idle_sites.clear();
+diff --git a/src/runtime/runtime_bus_bridge.h b/src/runtime/runtime_bus_bridge.h
+index 632f33d..6e91675 100644
+--- a/src/runtime/runtime_bus_bridge.h
++++ b/src/runtime/runtime_bus_bridge.h
+@@ -42,6 +42,11 @@ struct RuntimeTimingContext {
+     std::uint64_t yielded_vblank = 0;
+     std::uint64_t pending_cycles = 0;
+     std::int64_t event_budget = 0;
++    // CPU time discount (g_runtime_cycle_discount_shift) and its remainder.
++    // Per machine: a link session swaps them with the rest of the timing, and
++    // saves them, because a game hook that sets them changes guest scheduling.
++    unsigned discount_shift = 0;
++    std::uint32_t discount_carry = 0;
+ };
+ void runtime_capture_timing_context(RuntimeTimingContext&);
+ void runtime_restore_timing_context(const RuntimeTimingContext&);
+-- 
+2.51.0.windows.1
+

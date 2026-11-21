@@ -209,8 +209,14 @@ void save_ini() {
 
 // The link game the host picks. The game's own MULTIPLAYER menus set the
 // rest; the opening script (opening_script) steps both consoles there.
-const char* const kModes[] = {"DUKEMATCH", "CO-OP"};
-constexpr int kModeCount = 2;
+// The link game is always DEATH MATCH for two players; the host picks the
+// world and the limit (SERVER SETUP rows, in the game's own order: RIGHT steps
+// forward and wraps). Sent as one byte: world | limit << 4.
+const char* const kWorlds[] = {"AREA 51", "EGYPT 1", "EGYPT 2", "SYDNEY 1", "SYDNEY 2", "ALIEN 1", "ALIEN 2"};
+const char* const kLimits[] = {"FIRST TO 10", "FIRST TO 20", "FIRST TO 30", "UNLIMITED", "5 MIN", "10 MIN", "20 MIN"};
+constexpr int kWorldCount = 7, kLimitCount = 7;
+int mode_world(int mode) { return (mode & 15) % kWorldCount; }
+int mode_limit(int mode) { return ((mode >> 4) & 15) % kLimitCount; }
 
 enum ControlKind : std::uint8_t { kStartNote = 1, kStartAck = 2, kChatNote = 3, kSettingsNote = 4 };
 
@@ -242,10 +248,10 @@ void ensure_client() {
         std::string who = "?";
         for (const auto& m : c.members()) if (m.id == from) who = m.name;
         if (p[0] == kChatNote && len > 1) c.add_chat(who, std::string(reinterpret_cast<const char*>(p + 1), len - 1), true);
-        if (p[0] == kSettingsNote && len >= 2 && from == c.host_id() && !c.is_host()) g_on.mode = p[1] % kModeCount;
+        if (p[0] == kSettingsNote && len >= 2 && from == c.host_id() && !c.is_host()) g_on.mode = p[1];
         if (p[0] == kStartNote && len >= 6 && from == c.host_id() && !c.is_host()) {
             std::memcpy(&g_on.match, p + 1, 4);
-            g_on.mode = p[5] % kModeCount;
+            g_on.mode = p[5];
             g_on.peer = from;
             g_ui.screen = Screen::Starting;
             g_on.start_deadline = dukeonline::now_ms() + 600;
@@ -264,24 +270,38 @@ void send_settings() {
     g_on.settings_sent_ms = dukeonline::now_ms();
 }
 
-// The pad sequence that takes a console from power-on to the chosen link
-// game, as the netplay script: "first last mask" per press. Ticks count from
-// the first frame of the match; the keyboard is ignored until the last one.
-std::string opening_script(bool host) {
+// Both consoles' pads from power-on to the first frame of the deathmatch, as
+// the framework's agreed opening (GBARECOMP_NETPLAY_OPENING): "seat first
+// last mask" per press. Every PC runs it alone at full speed from blank
+// cartridges before connecting, so the match starts in the level a few
+// seconds after START. Seat 0's console is the cable master (DUKE 1), which
+// gets SERVER SETUP; the other waits, then both confirm the settings.
+std::string opening_rows(int mode) {
     std::string out;
     unsigned t = 1500;
-    auto press = [&](unsigned mask, unsigned gap) {
-        out += std::to_string(t) + " " + std::to_string(t + 3) + " " + std::to_string(mask) + "\n";
+    auto press = [&](int seat, unsigned mask, unsigned gap) {
+        for (int s = 0; s < 2; ++s)
+            if (seat < 0 || seat == s)
+                out += std::to_string(s) + " " + std::to_string(t) + " " + std::to_string(t + 3) + " " +
+                       std::to_string(mask) + "\n";
         t += 4 + gap;
     };
-    press(kA, 200);                                     // language
-    press(kStart, 200);                                 // title
-    for (int i = 0; i < 3; ++i) press(kDown, 40);       // MULTIPLAYER
-    press(kA, 200);
-    // The host's console is now on SERVER SETUP (game type, world, limit,
-    // launch) and the other on WAITING FOR SERVER: the players take over in
-    // the game's own menus.
-    (void)host;
+    press(-1, kA, 200);                                  // language
+    press(-1, kStart, 200);                              // title
+    for (int i = 0; i < 3; ++i) press(-1, kDown, 40);    // MULTIPLAYER
+    press(-1, kA, 400);
+    // SERVER SETUP on the host: GAME TYPE (DEATH MATCH only), WORLD, SET
+    // LIMIT, LAUNCH. RIGHT steps each choice forward from its first entry.
+    // After moving to a row its value box slides in, and a RIGHT pressed
+    // before it has (about 60 ticks) is lost: wait 150 after each DOWN.
+    press(0, kDown, 150);
+    for (int i = 0; i < mode_world(mode); ++i) press(0, kRight, 56);
+    press(0, kDown, 150);
+    for (int i = 0; i < mode_limit(mode); ++i) press(0, kRight, 56);
+    press(0, kDown, 56);
+    press(0, kA, 300);                                   // LAUNCH
+    press(1, kA, 300);                                   // the other confirms
+    press(0, kA, 0);                                     // and the host
     return out;
 }
 
@@ -289,15 +309,16 @@ void restart_into_match() {
     RoomClient& c = *g_on.client;
     const bool host = c.is_host();
     const std::filesystem::path script = std::filesystem::temp_directory_path() /
-        ("duke_online_" + std::to_string(g_on.match) + (host ? "_0" : "_1") + ".script");
-    { std::ofstream out(script, std::ios::trunc); out << opening_script(host); }
+        ("duke_online_" + std::to_string(g_on.match) + (host ? "_0" : "_1") + ".opening");
+    { std::ofstream out(script, std::ios::trunc); out << opening_rows(g_on.mode); }
     std::string cmd = "\"" + g_exe + "\" --online-server \"" + g_server + "\" --online-name \"" + g_name +
         "\" --online-resume " + std::to_string(c.session()) + " --online-seat " + (host ? "0" : "1") +
         " --online-peer " + std::to_string(g_on.peer) + " --online-match " + std::to_string(g_on.match) +
         " --online-room " + std::to_string(c.room());
     if (!g_save_path.empty()) cmd += " --save-path \"" + g_save_path + "\"";
 #if defined(_WIN32)
-    SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str());
+    SetEnvironmentVariableA("GBARECOMP_NETPLAY_OPENING", script.string().c_str());
+    SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", nullptr);
     // The new game writes to the same log as this one (when there is one).
     // Only those two handles are inherited: no sockets, no files.
     STARTUPINFOEXA si{}; si.StartupInfo.cb = sizeof(si);
@@ -339,7 +360,8 @@ void restart_into_match() {
     }
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
 #else
-    setenv("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str(), 1);
+    setenv("GBARECOMP_NETPLAY_OPENING", script.string().c_str(), 1);
+    unsetenv("GBARECOMP_NETPLAY_SCRIPT");
     if (std::system((cmd + " &").c_str()) != 0) { show_message("could not restart the game", Screen::Room); return; }
 #endif
     // Keep the room seat for the new process: no goodbye to the server.
@@ -405,7 +427,7 @@ void pump_network() {
 // ── rows of the full menus ──────────────────────────────────────────────────
 enum Item { kSettingRow, kBack,
 #if defined(DUKE_NETPLAY)
-    kHost, kFind, kCode, kName, kSay, kModeRow, kStartRow, kLeave, kRoomRow,
+    kHost, kFind, kCode, kName, kSay, kWorldRow, kLimitRow, kStartRow, kLeave, kRoomRow,
 #endif
 };
 struct Row { Item item; int index; std::string text; bool enabled = true; bool value = false; };
@@ -456,6 +478,8 @@ std::vector<Row> rows() {
         break;
     case Screen::Room: {
         const bool host = g_on.client && g_on.client->is_host();
+        r.push_back({kWorldRow, 0, std::string("WORLD: ") + kWorlds[mode_world(g_on.mode)], host, host});
+        r.push_back({kLimitRow, 0, std::string("LIMIT: ") + kLimits[mode_limit(g_on.mode)], host, host});
         if (host) r.push_back({kStartRow, 0, "START", g_on.client->members().size() >= 2});
         r.push_back({kSay, 0, "CHAT"});
         r.push_back({kLeave, 0, "LEAVE ROOM"});
@@ -495,8 +519,11 @@ void change(const Row& row, int dir) {
         duke_pc_controls_set(it.key, v);
     }
 #if defined(DUKE_NETPLAY)
-    if (row.item == kModeRow && g_on.client && g_on.client->is_host()) {
-        g_on.mode = (g_on.mode + dir + kModeCount) % kModeCount;
+    if ((row.item == kWorldRow || row.item == kLimitRow) && g_on.client && g_on.client->is_host()) {
+        int w = mode_world(g_on.mode), l = mode_limit(g_on.mode);
+        if (row.item == kWorldRow) w = (w + dir + kWorldCount) % kWorldCount;
+        else l = (l + dir + kLimitCount) % kLimitCount;
+        g_on.mode = w | l << 4;
         send_settings();
     }
 #endif
@@ -508,7 +535,7 @@ void choose(const Row& row) {
     case kSettingRow: change(row, 1); break;
     case kBack: close_menu(); break;
 #if defined(DUKE_NETPLAY)
-    case kModeRow: change(row, 1); break;
+    case kWorldRow: case kLimitRow: change(row, 1); break;
     case kHost:
         ensure_client(); g_on.want_host = true; g_on.want_join = 0; g_on.mode = 0;
         show_message("opening a room...", Screen::Online);

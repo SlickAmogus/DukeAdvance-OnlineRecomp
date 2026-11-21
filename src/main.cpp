@@ -13,17 +13,68 @@
 #include "pc_menu.h"
 #include "scene_host.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include <exception>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+// A crash leaves crash.log (exception, address inside the exe) and crash.dmp
+// beside the game, so a report from another PC can be traced. (The runtime's
+// own fatal errors already append to crash.log.) Same as GTA Advance's.
+static LONG WINAPI write_crash_report(EXCEPTION_POINTERS* info) {
+    static volatile LONG once = 0;
+    if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    char exe[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return EXCEPTION_CONTINUE_SEARCH;
+    std::string dir(exe);
+    dir.erase(dir.find_last_of("\\/") + 1);
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
+    const auto* rec = info ? info->ExceptionRecord : nullptr;
+    const auto at = rec ? reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress) : 0;
+    if (std::FILE* f = std::fopen((dir + "crash.log").c_str(), "a")) {
+        SYSTEMTIME t; GetLocalTime(&t);
+        std::fprintf(f, "%04u-%02u-%02u %02u:%02u:%02u crash: exception 0x%08lX at %p (exe+0x%llX)",
+                     t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+                     rec ? static_cast<unsigned long>(rec->ExceptionCode) : 0ul, reinterpret_cast<void*>(at),
+                     static_cast<unsigned long long>(at - base));
+        if (rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+            std::fprintf(f, ", %s 0x%llX", rec->ExceptionInformation[0] ? "writing" : "reading",
+                         static_cast<unsigned long long>(rec->ExceptionInformation[1]));
+        std::fprintf(f, "\n\n");
+        std::fclose(f);
+    }
+    using DumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+    if (HMODULE dbghelp = LoadLibraryA("dbghelp.dll")) {
+        if (auto dump = reinterpret_cast<DumpFn>(reinterpret_cast<void*>(GetProcAddress(dbghelp, "MiniDumpWriteDump")))) {
+            HANDLE file = CreateFileA((dir + "crash.dmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) {
+                struct { DWORD thread; EXCEPTION_POINTERS* pointers; BOOL client; } exc{GetCurrentThreadId(), info, FALSE};
+                dump(GetCurrentProcess(), GetCurrentProcessId(), file, 0 /* MiniDumpNormal */,
+                     info ? &exc : nullptr, nullptr, nullptr);
+                CloseHandle(file);
+            }
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
 
 static int tcp_command(const char* request, void (*write)(void*, const char*, std::size_t), void* ctx) {
     return duke_menu_tcp_command(request, write, ctx) || duke_debug_tcp_command(request, write, ctx);
 }
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(write_crash_report);
+#endif
     // Launcher-seam flags are sent by framework tooling (replay_diagnostic.py)
     // to every title; this host has no launcher, so drop them.
     std::vector<char*> args;
@@ -51,6 +102,13 @@ int main(int argc, char** argv) {
         "dukeadvance-eur", GBARECOMP_NETPLAY_BUILD_ID,
         "a4216a05cd8526d0c4fe7989e0d08d3e22202353c62780b22753ec916082af71");
     opts.netplay->supported_media = 1u << static_cast<unsigned>(gbarecomp::GbaLinkMedium::Cable);
+    // The game links in 115200-baud multiplayer mode, where one transfer takes
+    // 5755 cycles: each console may run 2048 cycles ahead of the other instead
+    // of 63 (the framework's bound for the fastest normal-mode transfer). The
+    // master starts a transfer about 6500 cycles after the slave has written
+    // its reply, so the slave's data is always in place. Cuts the scheduler's
+    // switches between the two consoles from about 25000 a frame to hundreds.
+    opts.netplay->link_lookahead = 2048;
     build_tag = std::string("dukeadv-") + std::string(GBARECOMP_NETPLAY_BUILD_ID).substr(0, 16);
     {
         // An online room (--online-host / --online-join / --online-resume)

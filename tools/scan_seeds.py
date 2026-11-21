@@ -31,8 +31,26 @@ for off in range(0, len(rom) - 3, 4):
 #    instruction after the bx, which netplay (no interpreter) needs as an entry.
 ret_points = {}
 for a in range(CODE_LO, CODE_HI - 4, 2):
-    if u16(a) == 0x44FE and (u16(a + 2) & 0xFF87) == 0x4700:
+    # 0x44FE = add lr, pc; 0x46FE = mov lr, pc (same return address).
+    if u16(a) in (0x44FE, 0x46FE) and (u16(a + 2) & 0xFF87) == 0x4700:
         ret_points.setdefault(a + 4, a)
+
+# 4. Targets in tables of three or more consecutive Thumb code pointers (call
+#    tables of small leaf routines without PUSH {lr}, and switch tables reached
+#    through bx). The interpreter used to cover these in single player; a link
+#    match has none, and a missed one ends the match.
+table_targets = {}
+words = [struct.unpack_from("<I", rom, o)[0] for o in range(0, 0x7FA000, 4)]
+isptr = [bool(v & 1) and CODE_LO <= v < CODE_HI for v in words]
+i = 0
+while i < len(words):
+    if not isptr[i]: i += 1; continue
+    j = i
+    while j < len(words) and isptr[j]: j += 1
+    if j - i >= 3:
+        for k in range(i, j):
+            table_targets.setdefault(words[k] & ~1, 0x08000000 + 4 * i)
+    i = j
 
 def arm_entry_ok(a):
     w = iw(a)
@@ -62,11 +80,16 @@ for a, ref in sorted(thumb.items()):
 for a, ref in sorted(ret_points.items()):
     if a in thumb: continue
     out += ['[[extra_func]]', f'addr = 0x{a:08X}', 'mode = "thumb"',
-            f'note = "return point of the long call at 0x{ref:08X} (add lr, pc; bx)"', '']
+            f'note = "return point of the long call at 0x{ref:08X} (add/mov lr, pc; bx)"', '']
+for a, ref in sorted(table_targets.items()):
+    if a in thumb or a in ret_points: continue
+    out += ['[[extra_func]]', f'addr = 0x{a:08X}', 'mode = "thumb"',
+            f'note = "Thumb code-pointer table at 0x{ref:08X}"', '']
 for a, ref in sorted(arm.items()):
     out += ['[[extra_func]]', f'addr = 0x{a:08X}', 'mode = "arm"',
             f'note = "IWRAM image routine (pointer at 0x{ref:08X})"', '']
 (root / "recomp_scan.toml").write_text("\n".join(out), encoding="utf-8")
-print(f"thumb pointer-table seeds: {len(thumb)}   long-call return points: {len(ret_points)}"
+print(f"thumb pointer-table seeds: {len(thumb)}   code-table targets: {len(table_targets)}"
+      f"   long-call return points: {len(ret_points)}"
       f"   IWRAM ARM seeds: {len(arm)}")
 print("IWRAM seeds:", " ".join(f"{a:08X}" for a in sorted(arm)))
